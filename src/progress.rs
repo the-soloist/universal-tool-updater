@@ -154,6 +154,10 @@ impl TaskProgress {
         }
     }
 
+    pub(crate) fn set_position(&self, bytes: u64) {
+        self.bar.set_position(bytes);
+    }
+
     fn update_prefix(&self, terminal_width: usize) {
         let prefix = task_prefix(&self.profile, &self.name, terminal_width);
         self.prefix_width.set(display_width(&prefix));

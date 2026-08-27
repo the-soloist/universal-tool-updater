@@ -326,7 +326,7 @@ impl UpdateSession<'_> {
                 self.downloader.download(
                     tool,
                     artifact,
-                    workspace.downloads(),
+                    &workspace,
                     index,
                     release.artifacts.len(),
                     progress,
@@ -341,6 +341,7 @@ impl UpdateSession<'_> {
             progress,
             self.compression_threads,
         )?;
+        workspace.clear_partials()?;
         Ok(result(
             tool,
             UpdateStatus::Updated,

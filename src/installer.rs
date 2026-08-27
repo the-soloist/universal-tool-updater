@@ -23,7 +23,7 @@ use crate::paths::is_portable_filename;
 use crate::progress::TaskProgress;
 use crate::workspace::ToolWorkspace;
 
-const RELEASE_VERSION_FILE: &str = ".version";
+const VERSION_FILE: &str = ".version";
 
 pub struct Installer<'a> {
     archive: &'a ArchiveService,
@@ -116,11 +116,15 @@ impl<'a> Installer<'a> {
         }
 
         apply_executable_bits(tool, &combined)?;
-        let release_version = stores_github_release_artifacts(tool)
-            .then(|| transaction.path().join(RELEASE_VERSION_FILE));
-        if let Some(path) = &release_version {
+        let external_version = (output_mode == OutputMode::Directory
+            && tool.install.input == InputMode::Copy)
+            .then(|| transaction.path().join(VERSION_FILE));
+        if let Some(path) = &external_version {
             fs::write(path, format!("{version}\n"))
-                .with_context(|| format!("cannot stage release version for tool {}", tool.id))?;
+                .with_context(|| format!("cannot stage version marker for tool {}", tool.id))?;
+        } else if output_mode == OutputMode::Directory {
+            fs::write(combined.join(VERSION_FILE), format!("{version}\n"))
+                .with_context(|| format!("cannot stage version marker for tool {}", tool.id))?;
         }
         let ready = match output_mode {
             OutputMode::Directory => combined,
@@ -151,7 +155,7 @@ impl<'a> Installer<'a> {
             tool,
             version,
             &ready,
-            release_version.as_deref(),
+            external_version.as_deref(),
             workspace.downloads(),
         )?;
         Ok(())
@@ -188,7 +192,7 @@ impl<'a> Installer<'a> {
         tool: &Tool,
         version: &str,
         ready: &Path,
-        release_version: Option<&Path>,
+        external_version: Option<&Path>,
         downloads: &Path,
     ) -> Result<()> {
         let destination = &tool.install.destination;
@@ -196,11 +200,11 @@ impl<'a> Installer<'a> {
         if backup.exists() {
             remove_path(&backup)?;
         }
-        let version_destination = release_version.map(|_| {
+        let version_destination = external_version.map(|_| {
             destination
                 .parent()
                 .expect("an installation destination always has a parent")
-                .join(RELEASE_VERSION_FILE)
+                .join(VERSION_FILE)
         });
         let version_backup = version_destination.as_deref().map(backup_path);
         if let Some(backup) = &version_backup
@@ -229,7 +233,7 @@ impl<'a> Installer<'a> {
             }
             return Err(error).with_context(|| {
                 format!(
-                    "cannot back up release version {} to {}",
+                    "cannot back up version marker {} to {}",
                     version_destination.display(),
                     version_backup.display()
                 )
@@ -254,7 +258,7 @@ impl<'a> Installer<'a> {
             });
         }
         if let (Some(staged), Some(version_destination)) =
-            (release_version, version_destination.as_deref())
+            (external_version, version_destination.as_deref())
             && let Err(error) = fs::rename(staged, version_destination)
         {
             let _ = remove_path(destination);
@@ -271,7 +275,7 @@ impl<'a> Installer<'a> {
             }
             return Err(error).with_context(|| {
                 format!(
-                    "cannot commit release version to {}",
+                    "cannot commit version marker to {}",
                     version_destination.display()
                 )
             });
@@ -590,6 +594,77 @@ mod tests {
                 .join(".version.utu-backup")
                 .exists()
         );
+    }
+
+    #[test]
+    fn directory_output_records_version_inside_destination() {
+        let directory = tempdir().unwrap();
+        let toolkit = directory.path().join("Toolkit");
+        let downloads = toolkit.join("updates");
+        let destination = toolkit.join("Demo");
+        fs::create_dir_all(&downloads).unwrap();
+
+        let payload = directory.path().join("payload");
+        fs::create_dir(&payload).unwrap();
+        fs::write(payload.join("demo.bin"), "demo").unwrap();
+        let artifact = downloads.join("demo.7z");
+        let archive_service = ArchiveService;
+        archive_service.compress_7z(&payload, &artifact).unwrap();
+
+        let tool = Tool {
+            id: "demo".to_owned(),
+            name: "Demo".to_owned(),
+            profile: "test".to_owned(),
+            enabled: true,
+            release: ReleaseConfig::Web {
+                url: "https://example.com/demo".to_owned(),
+                version_pattern: "Version (.+)".to_owned(),
+                ignore_versions: Vec::new(),
+            },
+            artifacts: vec![ArtifactConfig::DirectUrl {
+                url: "https://example.com/demo.7z".to_owned(),
+            }],
+            install: InstallSpec {
+                destination: destination.clone(),
+                input: InputMode::Extract,
+                existing: ExistingPolicy::Replace,
+                save: OutputMode::Directory,
+                strip_single_root: true,
+                create_destination: true,
+                archive_name: "{name}-{version}.7z".to_owned(),
+                archive_password: None,
+                executable: Vec::new(),
+                symlinks: Vec::new(),
+            },
+            hooks: HookConfig::default(),
+        };
+        let hook_runner = HookRunner;
+        let installer = Installer::new(&archive_service, &hook_runner, directory.path(), &toolkit);
+        let run = RunWorkspace::create(&downloads).unwrap();
+        let workspace = run.prepare(&tool).unwrap();
+        let progress = ProgressManager::new(false, 1);
+        let task_progress = progress.task(&tool.profile, &tool.name);
+
+        installer
+            .install(
+                &tool,
+                "v2.1.0",
+                &[DownloadedArtifact { path: artifact }],
+                &workspace,
+                &task_progress,
+                1,
+            )
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(destination.join("demo.bin")).unwrap(),
+            "demo"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join(".version")).unwrap(),
+            "v2.1.0\n"
+        );
+        assert!(!toolkit.join(".version").exists());
     }
 
     #[cfg(unix)]

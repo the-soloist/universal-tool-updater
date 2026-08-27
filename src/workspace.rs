@@ -8,12 +8,14 @@ use crate::domain::Tool;
 
 pub(crate) struct RunWorkspace {
     directory: TempDir,
+    partials: PathBuf,
 }
 
 #[derive(Debug)]
 pub(crate) struct ToolWorkspace {
     downloads: PathBuf,
     unpacked: PathBuf,
+    partials: PathBuf,
 }
 
 impl RunWorkspace {
@@ -24,13 +26,17 @@ impl RunWorkspace {
             .prefix("run-")
             .tempdir_in(root)
             .with_context(|| format!("cannot create run directory in {}", root.display()))?;
-        Ok(Self { directory })
+        Ok(Self {
+            directory,
+            partials: root.join(".partial"),
+        })
     }
 
     pub(crate) fn prepare(&self, tool: &Tool) -> Result<ToolWorkspace> {
         let root = self.directory.path().join(&tool.id);
         let downloads = root.join("downloads");
         let unpacked = root.join("unpacked");
+        let partials = self.partials.join(&tool.id);
         fs::create_dir_all(&downloads).with_context(|| {
             format!(
                 "cannot create download directory for {} at {}",
@@ -45,9 +51,17 @@ impl RunWorkspace {
                 unpacked.display()
             )
         })?;
+        fs::create_dir_all(&partials).with_context(|| {
+            format!(
+                "cannot create partial download directory for {} at {}",
+                tool.id,
+                partials.display()
+            )
+        })?;
         Ok(ToolWorkspace {
             downloads,
             unpacked,
+            partials,
         })
     }
 }
@@ -59,6 +73,31 @@ impl ToolWorkspace {
 
     pub(crate) fn unpacked(&self) -> &Path {
         &self.unpacked
+    }
+
+    pub(crate) fn partials(&self) -> &Path {
+        &self.partials
+    }
+
+    pub(crate) fn clear_partials(&self) -> Result<()> {
+        if self.partials.exists() {
+            fs::remove_dir_all(&self.partials).with_context(|| {
+                format!(
+                    "cannot clear partial download directory {}",
+                    self.partials.display()
+                )
+            })?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ToolWorkspace {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir(&self.partials);
+        if let Some(root) = self.partials.parent() {
+            let _ = fs::remove_dir(root);
+        }
     }
 }
 
@@ -75,9 +114,10 @@ mod tests {
     use super::RunWorkspace;
 
     #[test]
-    fn tool_directories_are_isolated_and_run_directory_is_temporary() {
+    fn tool_directories_are_isolated_while_partial_downloads_persist() {
         let root = tempdir().unwrap();
         let run_path;
+        let partial_path;
         {
             let run = RunWorkspace::create(root.path()).unwrap();
             let first = run.prepare(&tool("first")).unwrap();
@@ -92,6 +132,8 @@ mod tests {
 
             fs::write(first.downloads().join("artifact.zip"), "first").unwrap();
             fs::write(second.downloads().join("artifact.zip"), "second").unwrap();
+            partial_path = first.partials().join("artifact.part");
+            fs::write(&partial_path, "partial").unwrap();
 
             assert_eq!(
                 fs::read_to_string(first.downloads().join("artifact.zip")).unwrap(),
@@ -104,6 +146,7 @@ mod tests {
             assert_ne!(first.downloads().parent(), second.downloads().parent());
         }
         assert!(!run_path.exists());
+        assert_eq!(fs::read_to_string(partial_path).unwrap(), "partial");
     }
 
     fn tool(id: &str) -> Tool {

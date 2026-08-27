@@ -18,7 +18,7 @@
 - 每个工具使用独立配置对象，来源解析、下载、归档、安装、钩子和状态管理互不依赖。
 - 解压后的重命名和目录整理由 Rust 原生 action 完成，不依赖 Batch、PowerShell 或 Unix Shell。
 - 复杂扩展只允许 Python 3 脚本；解释器可跨平台自动发现，也可通过 `UTU_PYTHON` 指定。
-- 下载先写入临时文件，安装使用同文件系统暂存和备份；失败时自动恢复旧版本。
+- 下载支持 HTTP 断点续传；未完成分片持久保留，安装使用同文件系统暂存和备份，失败时自动恢复旧版本。
 - 以工具的完整更新流程为并发任务；每个工具使用独立临时目录，下载、解压、压缩和安装不会互相覆盖。
 - 并发进度使用统一终端区域显示，并根据终端宽度切换完整、紧凑或极简布局。
 - 配置文件只描述工具，运行状态原子写入 `~/Tools/Toolkit/.updater/`。
@@ -162,7 +162,7 @@ defaults:
 
 相对 `downloads` 以 `updater` 可执行文件所在目录为基准；相对 `state` 和工具安装目标仍以 `toolkit_root` 为基准。绝对路径不做重新拼接。
 `network.jobs` 必须大于 0，表示默认同时执行的完整工具下载/更新任务数；命令行 `update --jobs N` 的优先级更高。
-每次运行会在 `downloads` 下创建独立的 `run-*` 临时目录，并进一步按工具 ID 隔离；运行结束后自动清理。
+每次运行会在 `downloads` 下创建独立的 `run-*` 临时目录，并进一步按工具 ID 隔离；运行结束后自动清理。未完成的下载保存在 `downloads/.partial/<tool-id>/`，下次更新使用 HTTP `Range` 和可用的 `If-Range` 校验器继续下载；服务端不支持 Range 或远端文件已变化时会自动从头下载。工具成功安装后会清理对应分片。
 
 每个 profile 文件的 `tools` 是字典，每个工具 ID 对应一个独立字典节点。ID 必须使用小写 kebab-case，多单词名称以 `-` 拼接，例如 `context-menu-manager`，不允许大写字母、空格、下划线或连续的 `-`。工具条目由四个明确部分组成：版本来源、下载产物、安装策略和可选钩子。
 
@@ -203,6 +203,8 @@ defaults:
 ```
 
 使用 `archive` 时，每个工具的 `destination` 目录只保存生成的压缩包。`archive_name` 支持 `{id}`、`{name}`、`{version}` 占位符，目前压缩格式固定为 7z。
+
+使用 `directory` 时，updater 会在 `<destination>/.version` 写入当前版本，并与目录内容一起原子提交。`input: copy` 的目标会自动使用 `<destination>/release` 保存原始文件，因此版本标记保存在配置目录的 `<destination>/.version`，而不是 `release/.version`。
 
 `input: copy` 的 GitHub Asset、GitHub Assets 和 GitHub Source 属于原始发布资源：updater 会将下载文件直接保存到 `destination/release`，不再二次压缩为 7z，并在 `destination/.version` 中记录当前版本。使用 `input: extract` 的工具不受此规则影响。
 

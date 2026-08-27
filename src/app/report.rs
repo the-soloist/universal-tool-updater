@@ -1,4 +1,8 @@
+use std::fmt::Write as _;
+
 use anyhow::Result;
+use console::{Style, Term};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::config::AppConfig;
 use crate::domain::{UpdateResult, UpdateStatus};
@@ -34,7 +38,6 @@ fn list_sort_key(profile: &str, name: &str, id: &str) -> (String, String, String
 }
 
 pub(super) fn print_summary(results: &[UpdateResult]) {
-    println!("\nUpdate summary");
     for result in results {
         tracing::debug!(
             tool = %result.tool_id,
@@ -43,14 +46,15 @@ pub(super) fn print_summary(results: &[UpdateResult]) {
             message = %result.message,
             "update result"
         );
-        println!(
-            "  {:<32} {:<8} {:<20} {}",
-            result.tool_id,
-            status_name(result.status),
-            result.version.as_deref().unwrap_or("-"),
-            result.message
-        );
     }
+    print!(
+        "{}",
+        render_summary(
+            results,
+            Term::stdout().size().1 as usize,
+            console::colors_enabled(),
+        )
+    );
 }
 
 fn status_name(status: UpdateStatus) -> &'static str {
@@ -63,9 +67,204 @@ fn status_name(status: UpdateStatus) -> &'static str {
     }
 }
 
+fn render_summary(results: &[UpdateResult], terminal_width: usize, color: bool) -> String {
+    let terminal_width = terminal_width.max(40);
+    let status_width = 9;
+    let desired_version_width = results
+        .iter()
+        .map(|result| display_width(result.version.as_deref().unwrap_or("-")))
+        .max()
+        .unwrap_or(0)
+        .max(display_width("VERSION"))
+        .min(20);
+    let version_width = desired_version_width.min((terminal_width / 4).clamp(7, 20));
+    let maximum_tool_width = terminal_width
+        .saturating_sub(15 + version_width)
+        .max(display_width("TOOL"));
+    let tool_width = results
+        .iter()
+        .map(|result| display_width(&result.tool_id))
+        .max()
+        .unwrap_or(0)
+        .max(display_width("TOOL"))
+        .min(32)
+        .min(maximum_tool_width);
+    let detail_offset = 2 + status_width + 2 + tool_width + 2 + version_width + 2;
+    let detail_width = terminal_width.saturating_sub(detail_offset);
+    let inline_details = detail_width >= 24;
+    let header = Style::new().bold().dim().force_styling(color);
+    let title = Style::new().bold().force_styling(color);
+    let result_word = if results.len() == 1 {
+        "result"
+    } else {
+        "results"
+    };
+    let mut output = String::new();
+
+    writeln!(
+        &mut output,
+        "\n{}",
+        title.apply_to(format!("Update summary · {} {result_word}", results.len()))
+    )
+    .expect("writing a String cannot fail");
+    if inline_details {
+        writeln!(
+            &mut output,
+            "  {}  {}  {}  {}",
+            header.apply_to(pad_display("STATUS", status_width)),
+            header.apply_to(pad_display("TOOL", tool_width)),
+            header.apply_to(pad_display("VERSION", version_width)),
+            header.apply_to("DETAIL")
+        )
+        .expect("writing a String cannot fail");
+    } else {
+        writeln!(
+            &mut output,
+            "  {}  {}  {}",
+            header.apply_to(pad_display("STATUS", status_width)),
+            header.apply_to(pad_display("TOOL", tool_width)),
+            header.apply_to("VERSION")
+        )
+        .expect("writing a String cannot fail");
+    }
+
+    for result in results {
+        let status = pad_display(status_label(result.status), status_width);
+        let status = status_style(result.status, color).apply_to(status);
+        let tool = pad_display(&result.tool_id, tool_width);
+        let version = pad_display(result.version.as_deref().unwrap_or("-"), version_width);
+
+        if inline_details {
+            let lines = wrap_display(&result.message, detail_width);
+            writeln!(
+                &mut output,
+                "  {status}  {tool}  {version}  {}",
+                lines.first().map(String::as_str).unwrap_or_default()
+            )
+            .expect("writing a String cannot fail");
+            for line in lines.iter().skip(1) {
+                writeln!(&mut output, "{}{line}", " ".repeat(detail_offset))
+                    .expect("writing a String cannot fail");
+            }
+        } else {
+            writeln!(&mut output, "  {status}  {tool}  {version}")
+                .expect("writing a String cannot fail");
+            for line in wrap_display(&result.message, terminal_width.saturating_sub(4)) {
+                writeln!(&mut output, "    {line}").expect("writing a String cannot fail");
+            }
+        }
+    }
+    output
+}
+
+fn status_label(status: UpdateStatus) -> &'static str {
+    match status {
+        UpdateStatus::Updated => "✓ updated",
+        UpdateStatus::Current => "● current",
+        UpdateStatus::Skipped => "○ skipped",
+        UpdateStatus::Failed => "✗ failed",
+        UpdateStatus::Planned => "→ planned",
+    }
+}
+
+fn status_style(status: UpdateStatus, color: bool) -> Style {
+    let style = match status {
+        UpdateStatus::Updated => Style::new().green().bold(),
+        UpdateStatus::Current => Style::new().cyan(),
+        UpdateStatus::Skipped => Style::new().yellow(),
+        UpdateStatus::Failed => Style::new().red().bold(),
+        UpdateStatus::Planned => Style::new().magenta(),
+    };
+    style.force_styling(color)
+}
+
+fn pad_display(value: &str, width: usize) -> String {
+    let mut value = truncate_display(value, width);
+    value.push_str(&" ".repeat(width.saturating_sub(display_width(&value))));
+    value
+}
+
+fn truncate_display(value: &str, max_width: usize) -> String {
+    if display_width(value) <= max_width {
+        return value.to_owned();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+
+    let available = max_width.saturating_sub(1);
+    let mut width = 0;
+    let mut truncated = String::new();
+    for character in value.chars() {
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if width + character_width > available {
+            break;
+        }
+        width += character_width;
+        truncated.push(character);
+    }
+    truncated.push('…');
+    truncated
+}
+
+fn wrap_display(value: &str, max_width: usize) -> Vec<String> {
+    let max_width = max_width.max(1);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+
+    for word in value.split_whitespace() {
+        if !current.is_empty() && display_width(&current) + 1 + display_width(word) <= max_width {
+            current.push(' ');
+            current.push_str(word);
+            continue;
+        }
+        if !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+        }
+
+        let mut remaining = word;
+        while display_width(remaining) > max_width {
+            let index = split_index(remaining, max_width);
+            lines.push(remaining[..index].to_owned());
+            remaining = &remaining[index..];
+        }
+        current.push_str(remaining);
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn split_index(value: &str, max_width: usize) -> usize {
+    let mut width = 0;
+    let mut index = 0;
+    for (offset, character) in value.char_indices() {
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if width + character_width > max_width && index != 0 {
+            break;
+        }
+        width += character_width;
+        index = offset + character.len_utf8();
+        if width >= max_width {
+            break;
+        }
+    }
+    index.max(value.chars().next().map(char::len_utf8).unwrap_or(0))
+}
+
+fn display_width(value: &str) -> usize {
+    UnicodeWidthStr::width(value)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::list_sort_key;
+    use crate::domain::{UpdateResult, UpdateStatus};
+
+    use super::{display_width, list_sort_key, render_summary};
 
     #[test]
     fn tools_are_sorted_by_profile_then_name_case_insensitively() {
@@ -86,5 +285,56 @@ mod tests {
                 ("reverse", "zoxide", "zoxide"),
             ]
         );
+    }
+
+    #[test]
+    fn summary_uses_a_distinct_color_for_every_status() {
+        let rendered = render_summary(&status_results(), 160, true);
+
+        for ansi_color in ["\x1b[32m", "\x1b[36m", "\x1b[33m", "\x1b[31m", "\x1b[35m"] {
+            assert!(rendered.contains(ansi_color), "missing {ansi_color:?}");
+        }
+    }
+
+    #[test]
+    fn summary_is_plain_text_when_color_is_disabled() {
+        let rendered = render_summary(&status_results(), 100, false);
+
+        assert!(!rendered.contains("\x1b["));
+        assert!(rendered.contains("✓ updated"));
+        assert!(rendered.contains("✗ failed"));
+    }
+
+    #[test]
+    fn summary_wraps_long_details_to_the_terminal_width() {
+        let results = [UpdateResult {
+            tool_id: "d-beaver".to_owned(),
+            status: UpdateStatus::Failed,
+            version: None,
+            message: "tool d-beaver: release resolution failed: no GitHub asset matched dbeaver-ce-very-long-version-win32.win32.x86_64.zip".to_owned(),
+        }];
+
+        let rendered = render_summary(&results, 64, false);
+
+        assert!(rendered.lines().all(|line| display_width(line) <= 64));
+        assert!(rendered.contains("d-beaver"));
+    }
+
+    fn status_results() -> Vec<UpdateResult> {
+        [
+            UpdateStatus::Updated,
+            UpdateStatus::Current,
+            UpdateStatus::Skipped,
+            UpdateStatus::Failed,
+            UpdateStatus::Planned,
+        ]
+        .into_iter()
+        .map(|status| UpdateResult {
+            tool_id: super::status_name(status).to_owned(),
+            status,
+            version: Some("v0.1.0".to_owned()),
+            message: "example result".to_owned(),
+        })
+        .collect()
     }
 }
