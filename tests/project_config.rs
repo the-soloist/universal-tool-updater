@@ -18,6 +18,7 @@ fn local_profile_manifest_is_valid_when_present() {
     assert!(!config.tools.is_empty());
     assert!(config.paths.toolkit_root.ends_with("Tools/Toolkit"));
     assert_eq!(config.paths.downloads, updater_directory.join("updates"));
+    assert_eq!(config.paths.staging, config.paths.downloads.join("staging"));
     assert!(config.paths.state.starts_with(&config.paths.toolkit_root));
     for tool in config.tools.values() {
         assert!(!tool.artifacts.is_empty(), "{} has no artifacts", tool.id);

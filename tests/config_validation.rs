@@ -63,6 +63,16 @@ schema_version: 5
 include: [tools.yaml]
 paths:
   toolkit_root: Toolkit
+  staging: ''
+"#,
+            "paths.staging must not be empty",
+        ),
+        (
+            r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
 network:
   user_agent: ''
 "#,
@@ -215,6 +225,55 @@ tools:
     let loaded = config::load(&directory.path().join("manifest.yaml")).unwrap();
     assert_eq!(loaded.tools.len(), 1);
     assert_eq!(loaded.tools["demo"].profile, "web");
+    assert_eq!(loaded.paths.staging, loaded.paths.downloads.join("staging"));
+}
+
+#[test]
+fn resolves_an_explicit_staging_directory_from_the_updater_directory() {
+    let directory = tempdir().unwrap();
+    fs::write(
+        directory.path().join("manifest.yaml"),
+        r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+  downloads: custom-downloads
+  staging: custom-staging
+"#,
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("tools.yaml"),
+        r#"
+tools:
+  demo:
+    release:
+      type: github
+      repository: owner/demo
+    artifacts:
+      - type: github-asset
+        pattern: demo.zip
+    install:
+      destination: Demo
+"#,
+    )
+    .unwrap();
+
+    let loaded = config::load(&directory.path().join("manifest.yaml")).unwrap();
+    let updater_directory = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    assert_eq!(
+        loaded.paths.downloads,
+        updater_directory.join("custom-downloads")
+    );
+    assert_eq!(
+        loaded.paths.staging,
+        updater_directory.join("custom-staging")
+    );
 }
 
 #[test]
@@ -508,6 +567,30 @@ tools:
       destination: Demo
 "#,
         "conflicts with paths.downloads",
+    );
+    assert_invalid_tool_with_manifest(
+        r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: ~/Tools/Toolkit
+  downloads: updates
+  staging: ~/Tools/Toolkit/Demo/transactions
+  state: .updater/state.yaml
+"#,
+        r#"
+tools:
+  demo:
+    release:
+      type: github
+      repository: owner/demo
+    artifacts:
+      - type: github-asset
+        pattern: demo.zip
+    install:
+      destination: Demo
+"#,
+        "conflicts with paths.staging",
     );
 }
 

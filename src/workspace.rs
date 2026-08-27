@@ -8,6 +8,7 @@ use crate::domain::Tool;
 
 pub(crate) struct RunWorkspace {
     directory: TempDir,
+    staging: TempDir,
     partials: PathBuf,
 }
 
@@ -15,20 +16,43 @@ pub(crate) struct RunWorkspace {
 pub(crate) struct ToolWorkspace {
     downloads: PathBuf,
     unpacked: PathBuf,
+    staging: PathBuf,
     partials: PathBuf,
 }
 
 impl RunWorkspace {
-    pub(crate) fn create(root: &Path) -> Result<Self> {
-        fs::create_dir_all(root)
-            .with_context(|| format!("cannot create update directory {}", root.display()))?;
+    pub(crate) fn create(downloads_root: &Path, staging_root: &Path) -> Result<Self> {
+        fs::create_dir_all(downloads_root).with_context(|| {
+            format!(
+                "cannot create update directory {}",
+                downloads_root.display()
+            )
+        })?;
+        fs::create_dir_all(staging_root).with_context(|| {
+            format!("cannot create staging directory {}", staging_root.display())
+        })?;
         let directory = Builder::new()
             .prefix("run-")
-            .tempdir_in(root)
-            .with_context(|| format!("cannot create run directory in {}", root.display()))?;
+            .tempdir_in(downloads_root)
+            .with_context(|| {
+                format!(
+                    "cannot create run directory in {}",
+                    downloads_root.display()
+                )
+            })?;
+        let staging = Builder::new()
+            .prefix("run-")
+            .tempdir_in(staging_root)
+            .with_context(|| {
+                format!(
+                    "cannot create staging run directory in {}",
+                    staging_root.display()
+                )
+            })?;
         Ok(Self {
             directory,
-            partials: root.join(".partial"),
+            staging,
+            partials: downloads_root.join(".partial"),
         })
     }
 
@@ -36,6 +60,7 @@ impl RunWorkspace {
         let root = self.directory.path().join(&tool.id);
         let downloads = root.join("downloads");
         let unpacked = root.join("unpacked");
+        let staging = self.staging.path().join(&tool.id);
         let partials = self.partials.join(&tool.id);
         fs::create_dir_all(&downloads).with_context(|| {
             format!(
@@ -51,6 +76,13 @@ impl RunWorkspace {
                 unpacked.display()
             )
         })?;
+        fs::create_dir(&staging).with_context(|| {
+            format!(
+                "cannot create transaction staging directory for {} at {}",
+                tool.id,
+                staging.display()
+            )
+        })?;
         fs::create_dir_all(&partials).with_context(|| {
             format!(
                 "cannot create partial download directory for {} at {}",
@@ -61,6 +93,7 @@ impl RunWorkspace {
         Ok(ToolWorkspace {
             downloads,
             unpacked,
+            staging,
             partials,
         })
     }
@@ -73,6 +106,10 @@ impl ToolWorkspace {
 
     pub(crate) fn unpacked(&self) -> &Path {
         &self.unpacked
+    }
+
+    pub(crate) fn staging(&self) -> &Path {
+        &self.staging
     }
 
     pub(crate) fn partials(&self) -> &Path {
@@ -116,10 +153,12 @@ mod tests {
     #[test]
     fn tool_directories_are_isolated_while_partial_downloads_persist() {
         let root = tempdir().unwrap();
+        let staging = root.path().join("staging");
         let run_path;
+        let staging_run_path;
         let partial_path;
         {
-            let run = RunWorkspace::create(root.path()).unwrap();
+            let run = RunWorkspace::create(root.path(), &staging).unwrap();
             let first = run.prepare(&tool("first")).unwrap();
             let second = run.prepare(&tool("second")).unwrap();
             run_path = first
@@ -129,6 +168,7 @@ mod tests {
                 .parent()
                 .unwrap()
                 .to_path_buf();
+            staging_run_path = first.staging().parent().unwrap().to_path_buf();
 
             fs::write(first.downloads().join("artifact.zip"), "first").unwrap();
             fs::write(second.downloads().join("artifact.zip"), "second").unwrap();
@@ -144,8 +184,11 @@ mod tests {
                 "second"
             );
             assert_ne!(first.downloads().parent(), second.downloads().parent());
+            assert_ne!(first.staging(), second.staging());
+            assert!(first.staging().starts_with(&staging));
         }
         assert!(!run_path.exists());
+        assert!(!staging_run_path.exists());
         assert_eq!(fs::read_to_string(partial_path).unwrap(), "partial");
     }
 

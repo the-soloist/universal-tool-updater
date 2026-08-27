@@ -23,6 +23,11 @@ pub(super) fn validate_manifest_values(path: &Path, manifest: &ManifestFile) -> 
             return Err(UpdaterError::config(path, format!("{field} must not be empty")).into());
         }
     }
+    if manifest.paths.staging.as_ref().is_some_and(|value| {
+        value.as_os_str().is_empty() || value.to_string_lossy().trim().is_empty()
+    }) {
+        return Err(UpdaterError::config(path, "paths.staging must not be empty").into());
+    }
 
     let network = &manifest.network;
     if network.user_agent.trim().is_empty() {

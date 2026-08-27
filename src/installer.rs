@@ -2,11 +2,11 @@ mod artifact;
 mod filesystem;
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use regex::Regex;
-use tempfile::Builder;
+use tempfile::{Builder, TempDir};
 
 use artifact::ArtifactPreparer;
 use filesystem::{
@@ -74,11 +74,8 @@ impl<'a> Installer<'a> {
         fs::create_dir_all(parent)
             .with_context(|| format!("cannot create destination parent {}", parent.display()))?;
 
-        let transaction = Builder::new()
-            .prefix(&format!(".{}-staging-", tool.id))
-            .tempdir_in(parent)
-            .with_context(|| format!("cannot create staging directory in {}", parent.display()))?;
-        let combined = transaction.path().join("content");
+        let transaction = workspace.staging();
+        let combined = transaction.join("content");
         fs::create_dir(&combined)?;
         let preparer = ArtifactPreparer::new(self.archive, workspace.unpacked());
         let output_mode = effective_output_mode(tool);
@@ -119,7 +116,7 @@ impl<'a> Installer<'a> {
         apply_executable_bits(tool, &combined)?;
         let external_version = (output_mode == OutputMode::Directory
             && tool.install.input == InputMode::Copy)
-            .then(|| transaction.path().join(VERSION_FILE));
+            .then(|| transaction.join(VERSION_FILE));
         if let Some(path) = &external_version {
             fs::write(path, format!("{version}\n"))
                 .with_context(|| format!("cannot stage version marker for tool {}", tool.id))?;
@@ -131,7 +128,7 @@ impl<'a> Installer<'a> {
             OutputMode::Directory => combined,
             OutputMode::Archive => {
                 progress.stage("compress");
-                let output = transaction.path().join("archive-output");
+                let output = transaction.join("archive-output");
                 fs::create_dir(&output)?;
                 let name = render_archive_name(&tool.install.archive_name, tool, version);
                 if !is_portable_filename(Path::new(&name)) {
@@ -151,12 +148,31 @@ impl<'a> Installer<'a> {
                 output
             }
         };
+        let direct_commit = same_filesystem(transaction, parent)?;
+        let commit_source = if direct_commit {
+            CommitSource::direct(&ready, external_version.as_deref())
+        } else {
+            progress.stage("transfer");
+            CommitSource::copy_next_to_destination(
+                tool,
+                &ready,
+                external_version.as_deref(),
+                parent,
+            )?
+        };
+        tracing::debug!(
+            tool = %tool.id,
+            staging = %transaction.display(),
+            destination = %destination.display(),
+            direct_commit,
+            "prepared installation transaction"
+        );
         progress.stage("install");
         self.commit(
             tool,
             version,
-            &ready,
-            external_version.as_deref(),
+            &commit_source.ready,
+            commit_source.external_version.as_deref(),
             workspace.downloads(),
         )?;
         Ok(())
@@ -359,6 +375,127 @@ impl<'a> Installer<'a> {
     }
 }
 
+struct CommitSource {
+    ready: PathBuf,
+    external_version: Option<PathBuf>,
+    _adjacent_transaction: Option<TempDir>,
+}
+
+impl CommitSource {
+    fn direct(ready: &Path, external_version: Option<&Path>) -> Self {
+        Self {
+            ready: ready.to_path_buf(),
+            external_version: external_version.map(Path::to_path_buf),
+            _adjacent_transaction: None,
+        }
+    }
+
+    fn copy_next_to_destination(
+        tool: &Tool,
+        ready: &Path,
+        external_version: Option<&Path>,
+        parent: &Path,
+    ) -> Result<Self> {
+        let transaction = Builder::new()
+            .prefix(&format!(".{}-commit-", tool.id))
+            .tempdir_in(parent)
+            .with_context(|| {
+                format!(
+                    "cannot create cross-filesystem commit directory in {}",
+                    parent.display()
+                )
+            })?;
+        let copied_ready = transaction.path().join("ready");
+        copy_tree(ready, &copied_ready).with_context(|| {
+            format!(
+                "cannot transfer staged installation for {} from {} to {}",
+                tool.id,
+                ready.display(),
+                copied_ready.display()
+            )
+        })?;
+        let copied_version = external_version
+            .map(|source| -> Result<PathBuf> {
+                let destination = transaction.path().join(VERSION_FILE);
+                fs::copy(source, &destination).with_context(|| {
+                    format!(
+                        "cannot transfer staged version marker for {} from {} to {}",
+                        tool.id,
+                        source.display(),
+                        destination.display()
+                    )
+                })?;
+                Ok(destination)
+            })
+            .transpose()?;
+        Ok(Self {
+            ready: copied_ready,
+            external_version: copied_version,
+            _adjacent_transaction: Some(transaction),
+        })
+    }
+}
+
+#[cfg(unix)]
+fn same_filesystem(source: &Path, destination: &Path) -> Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+
+    let source = fs::metadata(source)
+        .with_context(|| format!("cannot inspect staging directory {}", source.display()))?;
+    let destination = fs::metadata(destination).with_context(|| {
+        format!(
+            "cannot inspect destination parent {}",
+            destination.display()
+        )
+    })?;
+    Ok(source.dev() == destination.dev())
+}
+
+#[cfg(not(unix))]
+fn same_filesystem(source: &Path, destination: &Path) -> Result<bool> {
+    let probe = Builder::new()
+        .prefix(".utu-filesystem-probe-")
+        .tempfile_in(source)
+        .with_context(|| format!("cannot create filesystem probe in {}", source.display()))?;
+    let probe_path = probe.into_temp_path();
+    let target = Builder::new()
+        .prefix(".utu-filesystem-probe-")
+        .tempfile_in(destination)
+        .with_context(|| {
+            format!(
+                "cannot create filesystem probe target in {}",
+                destination.display()
+            )
+        })?;
+    let target_path = target.path().to_path_buf();
+    target.close().with_context(|| {
+        format!(
+            "cannot prepare filesystem probe target {}",
+            target_path.display()
+        )
+    })?;
+    match fs::hard_link(&probe_path, &target_path) {
+        Ok(()) => {
+            fs::remove_file(&target_path).with_context(|| {
+                format!(
+                    "cannot remove filesystem probe target {}",
+                    target_path.display()
+                )
+            })?;
+            Ok(true)
+        }
+        Err(error) => {
+            tracing::debug!(
+                source = %source.display(),
+                destination = %destination.display(),
+                error = %error,
+                "filesystem hard-link probe failed; using copy fallback"
+            );
+            Ok(false)
+        }
+    }
+}
+
 fn effective_output_mode(tool: &Tool) -> OutputMode {
     resolve_output_mode(tool.install.input, tool.install.save, &tool.artifacts)
 }
@@ -450,7 +587,68 @@ mod tests {
     use crate::progress::ProgressManager;
     use crate::workspace::RunWorkspace;
 
-    use super::{Installer, managed_archive_path, managed_archive_pattern};
+    use super::{CommitSource, Installer, managed_archive_path, managed_archive_pattern};
+
+    #[test]
+    fn cross_filesystem_fallback_copies_the_commit_source_next_to_the_destination() {
+        let directory = tempdir().unwrap();
+        let staging = directory.path().join("staging");
+        let ready = staging.join("ready");
+        let parent = directory.path().join("destination-parent");
+        fs::create_dir_all(ready.join("bin")).unwrap();
+        fs::create_dir(&parent).unwrap();
+        fs::write(ready.join("bin/demo"), "payload").unwrap();
+        let version = staging.join(".version");
+        fs::write(&version, "v2\n").unwrap();
+        let tool = Tool {
+            id: "demo".to_owned(),
+            name: "Demo".to_owned(),
+            profile: "test".to_owned(),
+            enabled: true,
+            release: ReleaseConfig::Github {
+                repository: "owner/demo".to_owned(),
+                ignore_versions: Vec::new(),
+            },
+            artifacts: Vec::new(),
+            install: InstallSpec {
+                destination: parent.join("Demo"),
+                input: InputMode::Copy,
+                existing: ExistingPolicy::Replace,
+                save: OutputMode::Directory,
+                strip_single_root: true,
+                create_destination: true,
+                archive_name: "{name}-{version}.7z".to_owned(),
+                archive_password: None,
+                executable: Vec::new(),
+                symlinks: Vec::new(),
+            },
+            hooks: HookConfig::default(),
+        };
+
+        let source =
+            CommitSource::copy_next_to_destination(&tool, &ready, Some(&version), &parent).unwrap();
+        let adjacent = source
+            ._adjacent_transaction
+            .as_ref()
+            .unwrap()
+            .path()
+            .to_path_buf();
+        assert!(source.ready.starts_with(&parent));
+        assert_eq!(
+            fs::read_to_string(source.ready.join("bin/demo")).unwrap(),
+            "payload"
+        );
+        assert_eq!(
+            fs::read_to_string(source.external_version.as_ref().unwrap()).unwrap(),
+            "v2\n"
+        );
+        assert_eq!(
+            fs::read_to_string(ready.join("bin/demo")).unwrap(),
+            "payload"
+        );
+        drop(source);
+        assert!(!adjacent.exists());
+    }
 
     #[test]
     fn keeps_github_copy_artifacts_uncompressed_and_records_release_version() {
@@ -529,7 +727,7 @@ mod tests {
         );
         let hook_runner = HookRunner;
         let installer = Installer::new(&archive_service, &hook_runner, directory.path(), &toolkit);
-        let run = RunWorkspace::create(&downloads).unwrap();
+        let run = RunWorkspace::create(&downloads, &downloads.join("staging")).unwrap();
         let workspace = run.prepare(&tool).unwrap();
         let progress = ProgressManager::new(false, 1);
         let task_progress = progress.task(&tool.profile, &tool.name);
@@ -625,7 +823,7 @@ mod tests {
         };
         let hook_runner = HookRunner;
         let installer = Installer::new(&archive_service, &hook_runner, directory.path(), &toolkit);
-        let run = RunWorkspace::create(&downloads).unwrap();
+        let run = RunWorkspace::create(&downloads, &downloads.join("staging")).unwrap();
         let workspace = run.prepare(&tool).unwrap();
         let progress = ProgressManager::new(false, 1);
         let task_progress = progress.task(&tool.profile, &tool.name);
@@ -701,7 +899,7 @@ mod tests {
         let archive_service = ArchiveService;
         let hook_runner = HookRunner;
         let installer = Installer::new(&archive_service, &hook_runner, directory.path(), &toolkit);
-        let run = RunWorkspace::create(&downloads).unwrap();
+        let run = RunWorkspace::create(&downloads, &downloads.join("staging")).unwrap();
         let workspace = run.prepare(&tool).unwrap();
         let progress = ProgressManager::new(false, 1);
         let task_progress = progress.task(&tool.profile, &tool.name);

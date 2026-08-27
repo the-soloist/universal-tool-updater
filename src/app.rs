@@ -52,11 +52,12 @@ pub fn run(cli: Cli) -> Result<()> {
                 .collect::<BTreeSet<_>>()
                 .len();
             println!(
-                "configuration valid: YAML files={}, profiles={}, tools={}, toolkit root {}",
+                "configuration valid: YAML files={}, profiles={}, tools={}, toolkit root {}, staging {}",
                 profile_count + 1,
                 profile_count,
                 config.tools.len(),
-                config.paths.toolkit_root.display()
+                config.paths.toolkit_root.display(),
+                config.paths.staging.display()
             );
             Ok(())
         }
@@ -135,7 +136,10 @@ fn update_tools(
     let workspace = if options.dry_run {
         None
     } else {
-        Some(RunWorkspace::create(&config.paths.downloads)?)
+        Some(RunWorkspace::create(
+            &config.paths.downloads,
+            &config.paths.staging,
+        )?)
     };
     let archive = ArchiveService;
     let hooks = HookRunner;

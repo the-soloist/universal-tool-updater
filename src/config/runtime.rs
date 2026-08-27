@@ -15,5 +15,6 @@ pub struct AppConfig {
 pub struct Paths {
     pub toolkit_root: PathBuf,
     pub downloads: PathBuf,
+    pub staging: PathBuf,
     pub state: PathBuf,
 }

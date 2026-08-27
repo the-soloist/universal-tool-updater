@@ -20,7 +20,7 @@ pub fn load(manifest_path: &Path) -> Result<AppConfig> {
     let manifest_path = resolve_manifest_path(&app_root, manifest_path);
     let manifest: ManifestFile = read_yaml(&manifest_path)?;
     validate_manifest(&manifest_path, &manifest)?;
-    let paths = resolve_paths(&app_root, &manifest)?;
+    let paths = resolve_paths(&app_root, &manifest_path, &manifest)?;
 
     let manifest_dir = manifest_path.parent().unwrap_or(Path::new("."));
     let mut tools = BTreeMap::new();
@@ -141,12 +141,33 @@ fn validate_manifest(path: &Path, manifest: &ManifestFile) -> Result<()> {
     validate_manifest_values(path, manifest)
 }
 
-fn resolve_paths(app_root: &Path, manifest: &ManifestFile) -> Result<Paths> {
+fn resolve_paths(app_root: &Path, manifest_path: &Path, manifest: &ManifestFile) -> Result<Paths> {
     let toolkit_root = resolve_from(app_root, &manifest.paths.toolkit_root)?;
     let updater_root = updater_directory()?;
+    let downloads = resolve_setting_path(&updater_root, &manifest.paths.downloads)?;
+    let staging = manifest
+        .paths
+        .staging
+        .as_deref()
+        .map(|path| resolve_setting_path(&updater_root, path))
+        .transpose()?
+        .unwrap_or_else(|| downloads.join("staging"));
+    let state = resolve_setting_path(&toolkit_root, &manifest.paths.state)?;
+    if staging == state || staging.starts_with(&state) {
+        return Err(UpdaterError::config(
+            manifest_path,
+            format!(
+                "paths.staging {} conflicts with paths.state {}",
+                staging.display(),
+                state.display()
+            ),
+        )
+        .into());
+    }
     Ok(Paths {
-        downloads: resolve_setting_path(&updater_root, &manifest.paths.downloads)?,
-        state: resolve_setting_path(&toolkit_root, &manifest.paths.state)?,
+        downloads,
+        staging,
+        state,
         toolkit_root,
     })
 }
@@ -231,6 +252,7 @@ fn validate_runtime_path_conflicts(path: &Path, tool: &Tool, paths: &Paths) -> R
     }
     for (field, reserved) in [
         ("paths.downloads", &paths.downloads),
+        ("paths.staging", &paths.staging),
         ("paths.state", &paths.state),
     ] {
         if paths_overlap(destination, reserved) {
@@ -249,6 +271,7 @@ fn validate_runtime_path_conflicts(path: &Path, tool: &Tool, paths: &Paths) -> R
     for link in &tool.install.symlinks {
         for (field, reserved) in [
             ("paths.downloads", &paths.downloads),
+            ("paths.staging", &paths.staging),
             ("paths.state", &paths.state),
         ] {
             if paths_overlap(&link.to, reserved) {

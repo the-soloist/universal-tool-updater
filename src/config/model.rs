@@ -28,6 +28,10 @@ pub struct PathConfig {
     pub toolkit_root: PathBuf,
     #[serde(default = "default_downloads")]
     pub downloads: PathBuf,
+    /// Transaction workspace. Relative paths are resolved from the updater binary;
+    /// when omitted it defaults to `<downloads>/staging`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staging: Option<PathBuf>,
     #[serde(default = "default_state")]
     pub state: PathBuf,
 }

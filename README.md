@@ -8,7 +8,7 @@
 ~/Tools/Toolkit
 ```
 
-状态文件和所有相对安装路径都位于该目录下；下载暂存目录默认是 `updater` 可执行文件旁的 `updates/`。全局设置位于 [`profiles/manifest.yaml`](profiles/manifest.yaml)。
+状态文件和所有相对安装路径都位于该目录下；下载目录默认是 `updater` 可执行文件旁的 `updates/`，安装事务暂存默认位于 `updates/staging/`。全局设置位于 [`profiles/manifest.yaml`](profiles/manifest.yaml)。
 
 ## 特性
 
@@ -18,7 +18,7 @@
 - 每个工具使用独立配置对象，来源解析、下载、归档、安装、钩子和状态管理互不依赖。
 - 解压后的重命名和目录整理由 Rust 原生 action 完成，不依赖 Batch、PowerShell 或 Unix Shell。
 - 复杂扩展只允许 Python 3 脚本；解释器可跨平台自动发现，也可通过 `UTU_PYTHON` 指定。
-- 下载支持 HTTP 断点续传；未完成分片持久保留，安装使用同文件系统暂存和备份，失败时自动恢复旧版本。
+- 下载支持 HTTP 断点续传；未完成分片持久保留，安装在独立 staging 中完成耗时处理，并通过原子提交和备份在失败时恢复旧版本。
 - 以工具的完整更新流程为并发任务；每个工具使用独立临时目录，下载、解压、压缩和安装不会互相覆盖。
 - 并发进度使用统一终端区域显示，并根据终端宽度切换完整、紧凑或极简布局。
 - 配置文件只描述工具，运行状态原子写入 `~/Tools/Toolkit/.updater/`。
@@ -107,7 +107,7 @@ updater update bat --dry-run
 updater update bat --force
 ```
 
-`check` 会加载 `manifest.yaml` 及全部 include profile，但不会访问网络或修改工具目录。它会检查 YAML 语法、必填字段、未知字段、枚举值、网络参数、HTTP(S) URL、HTTP 头、正则表达式、模板占位符、路径安全性和 Hook 参数，同时检查 release 与 artifact 类型、安装参数、工具目录、状态文件、下载目录及符号链接之间的冲突。失败时会返回非零退出码，并指出对应配置文件、工具和原因。
+`check` 会加载 `manifest.yaml` 及全部 include profile，但不会访问网络或修改工具目录。它会检查 YAML 语法、必填字段、未知字段、枚举值、网络参数、HTTP(S) URL、HTTP 头、正则表达式、模板占位符、路径安全性和 Hook 参数，同时检查 release 与 artifact 类型、安装参数、工具目录、状态文件、下载目录、事务暂存目录及符号链接之间的冲突。失败时会返回非零退出码，并指出对应配置文件、工具和原因。
 
 `--profiles` 直接指向包含 `manifest.yaml` 的目录。所有平台默认使用项目根目录下的 `profiles/`；需要切换配置时可显式指定其他目录：
 
@@ -147,6 +147,7 @@ include:
 paths:
   toolkit_root: ~/Tools/Toolkit
   downloads: updates
+  staging: updates/staging
   state: .updater/windows-state.yaml
 
 network:
@@ -162,9 +163,11 @@ defaults:
     archive_name: '{name} - {version}.7z'
 ```
 
-相对 `downloads` 以 `updater` 可执行文件所在目录为基准；相对 `state` 和工具安装目标仍以 `toolkit_root` 为基准。绝对路径不做重新拼接。
+相对 `downloads` 和 `staging` 以 `updater` 可执行文件所在目录为基准；相对 `state` 和工具安装目标仍以 `toolkit_root` 为基准。绝对路径不做重新拼接。省略 `staging` 时默认使用 `<downloads>/staging`。
 `network.jobs` 必须大于 0，表示默认同时执行的完整工具下载/更新任务数；命令行 `update --jobs N` 的优先级更高。
-每次运行会在 `downloads` 下创建独立的 `run-*` 临时目录，并进一步按工具 ID 隔离；运行结束后自动清理。未完成的下载保存在 `downloads/.partial/<tool-id>/`，下次更新使用 HTTP `Range` 和可用的 `If-Range` 校验器继续下载；服务端不支持 Range 或远端文件已变化时会自动从头下载。工具成功安装后会清理对应分片。
+每次运行会分别在 `downloads` 和 `staging` 下创建独立的 `run-*` 临时目录，并进一步按工具 ID 隔离；运行结束后自动清理。下载、解压位于 `downloads`，合并已有内容、生成版本文件和压缩 7z 位于 `staging`。未完成的下载保存在 `downloads/.partial/<tool-id>/`，下次更新使用 HTTP `Range` 和可用的 `If-Range` 校验器继续下载；服务端不支持 Range 或远端文件已变化时会自动从头下载。工具成功安装后会清理对应分片。
+
+最终提交时，如果 `staging` 和工具目标位于同一文件系统，updater 会直接通过 `rename` 原子切换；如果位于不同文件系统，会先复制到目标父目录中的短生命周期 `.工具名-commit-*` 目录，再执行原子切换。因此把 `staging` 放到 `updates` 可以避免解压、合并和压缩期间在同步盘产生长期瞬态目录，跨盘时仅最终传输阶段会短暂出现相邻目录。
 
 每个 profile 文件的 `tools` 是字典，每个工具 ID 对应一个独立字典节点。ID 必须使用小写 kebab-case，多单词名称以 `-` 拼接，例如 `context-menu-manager`，不允许大写字母、空格、下划线或连续的 `-`。工具条目由四个明确部分组成：版本来源、下载产物、安装策略和可选钩子。
 

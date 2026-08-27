@@ -95,6 +95,7 @@ fn resolves_downloads_extracts_installs_and_records_state() {
         paths: PathConfig {
             toolkit_root: toolkit.clone(),
             downloads: workspace.path().join("updates"),
+            staging: None,
             state: PathBuf::from(".updater/state.yaml"),
         },
         network: NetworkConfig {
@@ -232,6 +233,7 @@ fn runs_complete_tool_updates_in_parallel() {
         paths: PathConfig {
             toolkit_root: toolkit.clone(),
             downloads: workspace.path().join("updates"),
+            staging: None,
             state: PathBuf::from(".updater/state.yaml"),
         },
         network: NetworkConfig {
@@ -268,12 +270,14 @@ fn runs_complete_tool_updates_in_parallel() {
     let state = fs::read_to_string(toolkit.join(".updater/state.yaml")).unwrap();
     assert!(state.contains("alpha:"));
     assert!(state.contains("beta:"));
-    assert!(
-        fs::read_dir(workspace.path().join("updates"))
-            .unwrap()
-            .next()
-            .is_none()
-    );
+    let staging = workspace.path().join("updates/staging");
+    let update_entries = fs::read_dir(workspace.path().join("updates"))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(update_entries.len(), 1);
+    assert_eq!(update_entries[0].path(), staging);
+    assert!(fs::read_dir(&staging).unwrap().next().is_none());
 }
 
 fn zip_fixture() -> Vec<u8> {

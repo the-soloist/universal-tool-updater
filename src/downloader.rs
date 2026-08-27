@@ -632,7 +632,7 @@ mod tests {
 
         let root = tempdir().unwrap();
         let tool = tool();
-        let run = RunWorkspace::create(root.path()).unwrap();
+        let run = RunWorkspace::create(root.path(), &root.path().join("staging")).unwrap();
         let workspace = run.prepare(&tool).unwrap();
         let (partial, metadata) = partial_paths(workspace.partials(), &url);
         fs::write(&partial, &body[..6]).unwrap();
@@ -708,7 +708,7 @@ mod tests {
 
         let root = tempdir().unwrap();
         let tool = tool();
-        let run = RunWorkspace::create(root.path()).unwrap();
+        let run = RunWorkspace::create(root.path(), &root.path().join("staging")).unwrap();
         let workspace = run.prepare(&tool).unwrap();
         let client = Client::builder()
             .timeout(Duration::from_secs(5))

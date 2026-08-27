@@ -444,6 +444,7 @@ mod tests {
             paths: Paths {
                 toolkit_root: PathBuf::from("/toolkit"),
                 downloads: PathBuf::from("/toolkit/updates"),
+                staging: PathBuf::from("/toolkit/updates/staging"),
                 state: PathBuf::from("/toolkit/.updater/state.yaml"),
             },
             network: NetworkConfig::default(),

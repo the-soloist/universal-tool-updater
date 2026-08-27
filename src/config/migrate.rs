@@ -76,6 +76,7 @@ pub fn migrate_directory(input: &Path, output: &Path) -> Result<()> {
         paths: PathConfig {
             toolkit_root: PathBuf::from("~/Tools/Toolkit"),
             downloads: PathBuf::from("updates"),
+            staging: None,
             state: PathBuf::from(format!(".updater/{platform}-state.yaml")),
         },
         network: NetworkConfig::default(),
