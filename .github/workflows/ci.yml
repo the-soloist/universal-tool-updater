@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            targets: x86_64-unknown-linux-musl
+          - os: windows-latest
+            targets: x86_64-pc-windows-msvc
+          - os: macos-latest
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+          targets: ${{ matrix.targets }}
+      - name: Check formatting
+        if: runner.os == 'Linux'
+        run: cargo fmt --all -- --check
+      - name: Install musl linker
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+      - name: Lint
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Test
+        run: cargo test --all-targets --all-features
+      - name: Validate platform configuration
+        run: cargo run -- check
+      - name: Build release binary
+        if: runner.os != 'macOS'
+        shell: bash
+        run: ./build.sh --target ${{ matrix.targets }}
+      - name: Build universal macOS release binary
+        if: runner.os == 'macOS'
+        run: ./build.sh --macos-universal

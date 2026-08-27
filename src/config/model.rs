@@ -1,0 +1,140 @@
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+pub use crate::domain::{
+    ArtifactConfig, ExistingPolicy, HookAction, HookConfig, HookWorkingDirectory, InputMode,
+    NetworkConfig, OutputMode, ReleaseConfig,
+};
+
+pub const SCHEMA_VERSION: u32 = 5;
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestFile {
+    pub schema_version: u32,
+    pub include: Vec<String>,
+    pub paths: PathConfig,
+    #[serde(default)]
+    pub network: NetworkConfig,
+    #[serde(default)]
+    pub defaults: DefaultsConfig,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PathConfig {
+    pub toolkit_root: PathBuf,
+    #[serde(default = "default_downloads")]
+    pub downloads: PathBuf,
+    #[serde(default = "default_state")]
+    pub state: PathBuf,
+}
+
+fn default_downloads() -> PathBuf {
+    PathBuf::from("updates")
+}
+
+fn default_state() -> PathBuf {
+    PathBuf::from(".updater/state.yaml")
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DefaultsConfig {
+    pub create_destination: bool,
+    pub install: InstallDefaults,
+}
+
+impl Default for DefaultsConfig {
+    fn default() -> Self {
+        Self {
+            create_destination: true,
+            install: InstallDefaults::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct InstallDefaults {
+    pub input: InputMode,
+    pub existing: ExistingPolicy,
+    #[serde(alias = "output")]
+    pub save: OutputMode,
+    pub strip_single_root: bool,
+    pub archive_name: String,
+}
+
+impl Default for InstallDefaults {
+    fn default() -> Self {
+        Self {
+            input: InputMode::Extract,
+            existing: ExistingPolicy::Replace,
+            save: OutputMode::Directory,
+            strip_single_root: true,
+            archive_name: "{name} - {version}.7z".to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolFile {
+    pub tools: BTreeMap<String, ToolConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolConfig {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+    pub release: ReleaseConfig,
+    pub artifacts: Vec<ArtifactConfig>,
+    pub install: InstallConfig,
+    #[serde(default, skip_serializing_if = "HookConfig::is_empty")]
+    pub hooks: HookConfig,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct InstallConfig {
+    pub destination: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input: Option<InputMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub existing: Option<ExistingPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "output")]
+    pub save: Option<OutputMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strip_single_root: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub create_destination: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archive_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archive_password: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub executable: Vec<PathBuf>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub symlinks: Vec<SymlinkConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SymlinkConfig {
+    pub from: PathBuf,
+    pub to: PathBuf,
+}

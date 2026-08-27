@@ -1,0 +1,21 @@
+# Rust build output
+/target/
+
+# Locally copied release binaries
+/updater
+/updater.exe
+*.pdb
+
+# Editors and operating systems
+.idea/
+.DS_Store
+Thumbs.db
+*~
+
+# Local runtime and secret files
+.env
+*.log
+*.tmp
+
+# Local profile configuration (never commit these files)
+/profiles

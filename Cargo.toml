@@ -1,0 +1,50 @@
+[package]
+name = "universal-tool-updater"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+description = "A configuration-driven, cross-platform toolkit updater"
+repository = "https://github.com/the-soloist/universal-tool-updater"
+
+[[bin]]
+name = "updater"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+bzip2 = "0.5"
+chardetng = "0.1"
+clap = { version = "4.5", features = ["derive"] }
+console = "0.16"
+encoding_rs = "0.8"
+flate2 = "1"
+indicatif = "0.18"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+sevenz-rust = { package = "sevenz-rust2", version = "0.22" }
+serde = { version = "1", features = ["derive"] }
+sha1 = "0.10"
+tar = "0.4"
+tempfile = "3"
+thiserror = "2"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-width = "0.2"
+unrar-rs = { version = "0.5", default-features = false, features = ["crypto-rust"] }
+url = "2"
+walkdir = "2"
+xz2 = "0.1"
+yaml_serde = "0.10"
+zip = { version = "2", default-features = false, features = ["bzip2", "deflate", "deflate64", "zstd"] }
+
+[profile.release]
+codegen-units = 1
+debug = 0
+incremental = false
+lto = "thin"
+panic = "abort"
+strip = "symbols"
+
+[dev-dependencies]
+crc-fast = "1.10"

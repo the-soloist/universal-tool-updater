@@ -1,0 +1,139 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate-tag:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Match tag to Cargo version
+        shell: bash
+        run: |
+          version="$(awk -F'"' '/^version = "/ { print $2; exit }' Cargo.toml)"
+          expected="v${version}"
+          if [[ "${GITHUB_REF_NAME}" != "${expected}" ]]; then
+            echo "error: tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${expected}" >&2
+            exit 1
+          fi
+
+  build-linux:
+    name: Build Linux x86_64 musl
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: Install musl linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+      - name: Build release binary
+        run: ./build.sh --target x86_64-unknown-linux-musl
+      - name: Package release asset
+        shell: bash
+        run: |
+          mkdir -p dist
+          tar -C target/x86_64-unknown-linux-musl/release \
+            -czf "dist/universal-tool-updater-${GITHUB_REF_NAME}-x86_64-unknown-linux-musl.tar.gz" \
+            updater
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64-musl
+          path: dist/*
+          if-no-files-found: error
+
+  build-windows:
+    name: Build Windows x86_64
+    needs: validate-tag
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Build release binary
+        shell: bash
+        run: ./build.sh --target x86_64-pc-windows-msvc
+      - name: Package release asset
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $archive = "dist/universal-tool-updater-$env:GITHUB_REF_NAME-x86_64-pc-windows-msvc.zip"
+          Compress-Archive -Path target/x86_64-pc-windows-msvc/release/updater.exe -DestinationPath $archive
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64-msvc
+          path: dist/*
+          if-no-files-found: error
+
+  build-macos:
+    name: Build macOS Universal
+    needs: validate-tag
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - name: Build universal release binary
+        run: ./build.sh --macos-universal
+      - name: Package release asset
+        shell: bash
+        run: |
+          mkdir -p dist
+          tar -C target/universal-apple-darwin/release \
+            -czf "dist/universal-tool-updater-${GITHUB_REF_NAME}-universal-apple-darwin.tar.gz" \
+            updater
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-universal
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs:
+      - build-linux
+      - build-windows
+      - build-macos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Generate SHA-256 checksums
+        shell: bash
+        run: |
+          cd dist
+          sha256sum universal-tool-updater-* > SHA256SUMS
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes \
+              --verify-tag
+          fi
