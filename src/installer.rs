@@ -15,7 +15,8 @@ use filesystem::{
 
 use crate::archive::ArchiveService;
 use crate::domain::{
-    ArtifactConfig, DownloadedArtifact, ExistingPolicy, InputMode, OutputMode, Tool,
+    DownloadedArtifact, ExistingPolicy, InputMode, OutputMode, Tool,
+    effective_output_mode as resolve_output_mode,
 };
 use crate::error::UpdaterError;
 use crate::hooks::{HookContext, HookRunner, HookStage};
@@ -359,23 +360,7 @@ impl<'a> Installer<'a> {
 }
 
 fn effective_output_mode(tool: &Tool) -> OutputMode {
-    if stores_github_release_artifacts(tool) {
-        OutputMode::Directory
-    } else {
-        tool.install.save
-    }
-}
-
-fn stores_github_release_artifacts(tool: &Tool) -> bool {
-    tool.install.input == InputMode::Copy
-        && tool.artifacts.iter().any(|artifact| {
-            matches!(
-                artifact,
-                ArtifactConfig::GithubAsset { .. }
-                    | ArtifactConfig::GithubAssets { .. }
-                    | ArtifactConfig::GithubSource { .. }
-            )
-        })
+    resolve_output_mode(tool.install.input, tool.install.save, &tool.artifacts)
 }
 
 fn backup_path(path: &Path) -> std::path::PathBuf {

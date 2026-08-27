@@ -46,6 +46,81 @@ network:
 }
 
 #[test]
+fn rejects_invalid_manifest_parameter_values() {
+    for (manifest, expected) in [
+        (
+            r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: ''
+"#,
+            "paths.toolkit_root must not be empty",
+        ),
+        (
+            r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+network:
+  user_agent: ''
+"#,
+            "network.user_agent must not be empty",
+        ),
+        (
+            r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+network:
+  timeout_seconds: 0
+"#,
+            "network.timeout_seconds must be greater than zero",
+        ),
+        (
+            r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+network:
+  github_token_env: GITHUB-TOKEN
+"#,
+            "network.github_token_env must be a portable environment variable name",
+        ),
+        (
+            r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+defaults:
+  install:
+    archive_name: '{unknown}.7z'
+"#,
+            "unsupported placeholder {unknown}",
+        ),
+        (
+            r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+defaults:
+  install:
+    save: archive
+    archive_name: tool.zip
+"#,
+            "must use the .7z extension",
+        ),
+    ] {
+        assert_invalid_manifest(manifest, expected);
+    }
+}
+
+#[test]
 fn uses_save_for_global_output_mode_and_accepts_the_legacy_alias() {
     let manifest: ManifestFile = yaml_serde::from_str(
         r#"
@@ -220,6 +295,223 @@ tools:
 }
 
 #[test]
+fn rejects_invalid_release_and_artifact_values() {
+    assert_invalid_tool(
+        r#"
+tools:
+  demo:
+    release:
+      type: github
+      repository: 'owner /demo'
+    artifacts:
+      - type: github-asset
+        pattern: demo.zip
+    install:
+      destination: Demo
+"#,
+        "GitHub repository must be a valid owner/name",
+    );
+    assert_invalid_tool(
+        r#"
+tools:
+  demo:
+    release:
+      type: web
+      url: file:///tmp/releases.html
+      version_pattern: 'version=(.+)'
+    artifacts:
+      - type: page-link
+        pattern: 'href="([^"]+)"'
+    install:
+      destination: Demo
+"#,
+        "must use HTTP or HTTPS",
+    );
+    assert_invalid_tool(
+        r#"
+tools:
+  demo:
+    release:
+      type: http
+      url: https://example.com/demo.zip
+      version_headers: [etag, ETag]
+    artifacts:
+      - type: release-url
+    install:
+      destination: Demo
+"#,
+        "duplicate HTTP version header",
+    );
+    assert_invalid_tool(
+        r#"
+tools:
+  demo:
+    release:
+      type: github
+      repository: owner/demo
+      ignore_versions: [v1, v1]
+    artifacts:
+      - type: github-asset
+        pattern: demo.zip
+    install:
+      destination: Demo
+"#,
+        "duplicate ignore_versions entry",
+    );
+    assert_invalid_tool(
+        r#"
+tools:
+  demo:
+    release:
+      type: github
+      repository: owner/demo
+    artifacts:
+      - type: url-template
+        url: https://example.com/{version}/{platform}.zip
+    install:
+      destination: Demo
+"#,
+        "unsupported placeholder {platform}",
+    );
+    assert_invalid_tool(
+        r#"
+tools:
+  demo:
+    release:
+      type: github
+      repository: owner/demo
+    artifacts:
+      - type: direct-url
+        url: https://example.com/demo.zip
+      - type: direct-url
+        url: https://example.com/demo.zip
+    install:
+      destination: Demo
+"#,
+        "duplicate artifact configuration",
+    );
+}
+
+#[test]
+fn rejects_conflicting_install_parameters() {
+    assert_invalid_tool(
+        r#"
+tools:
+  demo:
+    release:
+      type: github
+      repository: owner/demo
+    artifacts:
+      - type: github-source
+        format: zip
+    install:
+      destination: Demo
+      input: copy
+      archive_password: secret
+"#,
+        "archive_password conflicts with input copy",
+    );
+    assert_invalid_tool(
+        r#"
+tools:
+  demo:
+    release:
+      type: web
+      url: https://example.com/releases
+      version_pattern: 'version=(.+)'
+    artifacts:
+      - type: direct-url
+        url: https://example.com/demo.zip
+    install:
+      destination: Demo
+      save: archive
+      symlinks:
+        - from: demo
+          to: bin/demo
+"#,
+        "symlinks require directory output",
+    );
+    assert_invalid_tool(
+        r#"
+tools:
+  demo:
+    release:
+      type: github
+      repository: owner/demo
+    artifacts:
+      - type: github-asset
+        pattern: demo.zip
+    install:
+      destination: Demo
+      executable: [demo, demo]
+"#,
+        "duplicate executable path",
+    );
+    assert_invalid_tool(
+        r#"
+tools:
+  demo:
+    release:
+      type: github
+      repository: owner/demo
+    artifacts:
+      - type: github-asset
+        pattern: demo.zip
+    install:
+      destination: Demo
+      symlinks:
+        - from: demo.exe
+          to: Demo/demo.exe
+"#,
+        "conflicts with its source",
+    );
+    assert_invalid_tool(
+        r#"
+tools:
+  demo:
+    name: '   '
+    release:
+      type: github
+      repository: owner/demo
+    artifacts:
+      - type: github-asset
+        pattern: demo.zip
+    install:
+      destination: Demo
+"#,
+        "name must not be empty",
+    );
+}
+
+#[test]
+fn rejects_empty_profiles_and_runtime_path_conflicts() {
+    assert_invalid_tool("tools: {}\n", "tools must not be empty");
+    assert_invalid_tool_with_manifest(
+        r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: ~/Tools/Toolkit
+  downloads: ~/Tools/Toolkit/Demo/cache
+  state: .updater/state.yaml
+"#,
+        r#"
+tools:
+  demo:
+    release:
+      type: github
+      repository: owner/demo
+    artifacts:
+      - type: github-asset
+        pattern: demo.zip
+    install:
+      destination: Demo
+"#,
+        "conflicts with paths.downloads",
+    );
+}
+
+#[test]
 fn rejects_non_python_external_hooks_and_native_actions_in_the_wrong_stage() {
     assert_invalid_tool(
         r#"
@@ -327,9 +619,7 @@ tools:
 }
 
 fn assert_invalid_tool(tool_file: &str, expected: &str) {
-    let directory = tempdir().unwrap();
-    fs::write(
-        directory.path().join("manifest.yaml"),
+    assert_invalid_tool_with_manifest(
         r#"
 schema_version: 5
 include:
@@ -339,8 +629,24 @@ paths:
   downloads: updates
   state: .updater/test-state.yaml
 "#,
-    )
-    .unwrap();
+        tool_file,
+        expected,
+    );
+}
+
+fn assert_invalid_manifest(manifest: &str, expected: &str) {
+    let directory = tempdir().unwrap();
+    fs::write(directory.path().join("manifest.yaml"), manifest).unwrap();
+    let error = config::load(&directory.path().join("manifest.yaml")).unwrap_err();
+    assert!(
+        error.to_string().contains(expected),
+        "expected {expected:?}, got {error:#}"
+    );
+}
+
+fn assert_invalid_tool_with_manifest(manifest: &str, tool_file: &str, expected: &str) {
+    let directory = tempdir().unwrap();
+    fs::write(directory.path().join("manifest.yaml"), manifest).unwrap();
     fs::write(directory.path().join("tools.yaml"), tool_file).unwrap();
     let error = config::load(&directory.path().join("manifest.yaml")).unwrap_err();
     assert!(

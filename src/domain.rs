@@ -49,6 +49,27 @@ pub enum OutputMode {
     Archive,
 }
 
+pub(crate) fn effective_output_mode(
+    input: InputMode,
+    configured: OutputMode,
+    artifacts: &[ArtifactConfig],
+) -> OutputMode {
+    if input == InputMode::Copy
+        && artifacts.iter().any(|artifact| {
+            matches!(
+                artifact,
+                ArtifactConfig::GithubAsset { .. }
+                    | ArtifactConfig::GithubAssets { .. }
+                    | ArtifactConfig::GithubSource { .. }
+            )
+        })
+    {
+        OutputMode::Directory
+    } else {
+        configured
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ReleaseConfig {

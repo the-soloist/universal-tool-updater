@@ -107,6 +107,8 @@ updater update bat --dry-run
 updater update bat --force
 ```
 
+`check` 会加载 `manifest.yaml` 及全部 include profile，但不会访问网络或修改工具目录。它会检查 YAML 语法、必填字段、未知字段、枚举值、网络参数、HTTP(S) URL、HTTP 头、正则表达式、模板占位符、路径安全性和 Hook 参数，同时检查 release 与 artifact 类型、安装参数、工具目录、状态文件、下载目录及符号链接之间的冲突。失败时会返回非零退出码，并指出对应配置文件、工具和原因。
+
 `--profiles` 直接指向包含 `manifest.yaml` 的目录。所有平台默认使用项目根目录下的 `profiles/`；需要切换配置时可显式指定其他目录：
 
 ```bash

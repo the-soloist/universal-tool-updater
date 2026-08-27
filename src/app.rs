@@ -2,7 +2,7 @@ mod report;
 mod selection;
 mod show;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -44,8 +44,17 @@ pub fn run(cli: Cli) -> Result<()> {
         jobs: None,
     }) {
         Command::Check => {
+            validate_profiles(&config, &profiles)?;
+            let profile_count = config
+                .tools
+                .values()
+                .map(|tool| tool.profile.as_str())
+                .collect::<BTreeSet<_>>()
+                .len();
             println!(
-                "configuration valid: {} tools, toolkit root {}",
+                "configuration valid: YAML files={}, profiles={}, tools={}, toolkit root {}",
+                profile_count + 1,
+                profile_count,
                 config.tools.len(),
                 config.paths.toolkit_root.display()
             );

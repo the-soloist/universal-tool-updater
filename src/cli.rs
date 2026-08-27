@@ -71,7 +71,7 @@ pub enum Command {
         tree: bool,
     },
 
-    /// Parse and validate all configuration without network access.
+    /// Validate every included YAML value and cross-field constraint without network access.
     Check,
 
     /// Convert legacy TOML files to the current YAML schema.

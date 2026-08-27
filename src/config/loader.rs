@@ -7,7 +7,9 @@ use anyhow::{Context, Result};
 use crate::config::model::{
     DefaultsConfig, InstallConfig, ManifestFile, SCHEMA_VERSION, ToolConfig, ToolFile,
 };
-use crate::config::validation::{validate_install_spec, validate_tool_config};
+use crate::config::validation::{
+    validate_install_spec, validate_manifest_values, validate_tool_config,
+};
 use crate::config::{AppConfig, Paths};
 use crate::domain::{InputMode, InstallSpec, SymlinkSpec, Tool};
 use crate::error::UpdaterError;
@@ -40,6 +42,9 @@ pub fn load(manifest_path: &Path) -> Result<AppConfig> {
             .into());
         }
         let tool_file: ToolFile = read_yaml(&path)?;
+        if tool_file.tools.is_empty() {
+            return Err(UpdaterError::config(&path, "tools must not be empty").into());
+        }
         for (id, raw) in tool_file.tools {
             validate_tool_config(&path, &id, &raw, &app_root)?;
             if tools.contains_key(&id) {
@@ -53,6 +58,7 @@ pub fn load(manifest_path: &Path) -> Result<AppConfig> {
                 &manifest.defaults,
                 &paths,
             )?;
+            validate_runtime_path_conflicts(&path, &tool, &paths)?;
             if let Some((destination, previous)) = destinations.iter().find(|(destination, _)| {
                 tool.install.destination.starts_with(destination)
                     || destination.starts_with(&tool.install.destination)
@@ -132,10 +138,7 @@ fn validate_manifest(path: &Path, manifest: &ManifestFile) -> Result<()> {
     if manifest.include.is_empty() {
         return Err(UpdaterError::config(path, "include must not be empty").into());
     }
-    if manifest.network.jobs == 0 {
-        return Err(UpdaterError::config(path, "network.jobs must be greater than zero").into());
-    }
-    Ok(())
+    validate_manifest_values(path, manifest)
 }
 
 fn resolve_paths(app_root: &Path, manifest: &ManifestFile) -> Result<Paths> {
@@ -200,9 +203,10 @@ fn materialize_tool(
     paths: &Paths,
 ) -> Result<Tool> {
     let install = resolve_install(path, &id, &raw.install, defaults, paths)?;
-    validate_install_spec(path, &id, &install)?;
+    let name = raw.name.unwrap_or_else(|| id.clone());
+    validate_install_spec(path, &id, &name, &raw.artifacts, &install)?;
     Ok(Tool {
-        name: raw.name.unwrap_or_else(|| id.clone()),
+        name,
         id,
         profile,
         enabled: raw.enabled,
@@ -211,6 +215,61 @@ fn materialize_tool(
         install,
         hooks: raw.hooks,
     })
+}
+
+fn validate_runtime_path_conflicts(path: &Path, tool: &Tool, paths: &Paths) -> Result<()> {
+    let destination = &tool.install.destination;
+    if destination == &paths.toolkit_root {
+        return Err(UpdaterError::config(
+            path,
+            format!(
+                "tool {}: destination must not equal paths.toolkit_root",
+                tool.id
+            ),
+        )
+        .into());
+    }
+    for (field, reserved) in [
+        ("paths.downloads", &paths.downloads),
+        ("paths.state", &paths.state),
+    ] {
+        if paths_overlap(destination, reserved) {
+            return Err(UpdaterError::config(
+                path,
+                format!(
+                    "tool {}: destination {} conflicts with {field} {}",
+                    tool.id,
+                    destination.display(),
+                    reserved.display()
+                ),
+            )
+            .into());
+        }
+    }
+    for link in &tool.install.symlinks {
+        for (field, reserved) in [
+            ("paths.downloads", &paths.downloads),
+            ("paths.state", &paths.state),
+        ] {
+            if paths_overlap(&link.to, reserved) {
+                return Err(UpdaterError::config(
+                    path,
+                    format!(
+                        "tool {}: symlink target {} conflicts with {field} {}",
+                        tool.id,
+                        link.to.display(),
+                        reserved.display()
+                    ),
+                )
+                .into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
 }
 
 fn resolve_install(
@@ -303,9 +362,6 @@ fn resolve_destination(root: &Path, raw: &Path) -> std::result::Result<PathBuf, 
         return Err("destination must not be empty".to_owned());
     }
     let expanded = expand_path(raw).map_err(|error| error.to_string())?;
-    if expanded.is_absolute() {
-        return Ok(expanded);
-    }
     if expanded
         .components()
         .any(|part| matches!(part, Component::ParentDir))
@@ -314,6 +370,9 @@ fn resolve_destination(root: &Path, raw: &Path) -> std::result::Result<PathBuf, 
             "relative destination {} may not contain '..'",
             raw.display()
         ));
+    }
+    if expanded.is_absolute() {
+        return Ok(expanded);
     }
     if !is_portable_relative_path(&expanded, false) {
         return Err(format!(
