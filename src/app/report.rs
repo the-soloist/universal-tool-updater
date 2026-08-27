@@ -1,5 +1,3 @@
-use std::cmp::Ordering;
-
 use anyhow::Result;
 
 use crate::config::AppConfig;
@@ -14,7 +12,7 @@ pub(super) fn list_tools(config: &AppConfig, profiles: &[String]) -> Result<()> 
         .values()
         .filter(|tool| profiles.is_empty() || profiles.contains(&tool.profile))
         .collect::<Vec<_>>();
-    tools.sort_by(|left, right| compare_tool_ids(&left.id, &right.id));
+    tools.sort_by_cached_key(|tool| list_sort_key(&tool.profile, &tool.name, &tool.id));
 
     for tool in tools {
         println!(
@@ -27,10 +25,12 @@ pub(super) fn list_tools(config: &AppConfig, profiles: &[String]) -> Result<()> 
     Ok(())
 }
 
-fn compare_tool_ids(left: &str, right: &str) -> Ordering {
-    left.to_lowercase()
-        .cmp(&right.to_lowercase())
-        .then_with(|| left.cmp(right))
+fn list_sort_key(profile: &str, name: &str, id: &str) -> (String, String, String) {
+    (
+        profile.to_lowercase(),
+        name.to_lowercase(),
+        id.to_lowercase(),
+    )
 }
 
 pub(super) fn print_summary(results: &[UpdateResult]) {
@@ -65,13 +65,26 @@ fn status_name(status: UpdateStatus) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::compare_tool_ids;
+    use super::list_sort_key;
 
     #[test]
-    fn tool_ids_are_sorted_case_insensitively() {
-        let mut ids = ["zoxide", "BurpSuite", "afrog", "burpsuite"];
-        ids.sort_by(|left, right| compare_tool_ids(left, right));
+    fn tools_are_sorted_by_profile_then_name_case_insensitively() {
+        let mut tools = [
+            ("reverse", "zoxide", "zoxide"),
+            ("Crypto", "CyberChef", "cyber-chef"),
+            ("crypto", "captf-encoder", "captf-encoder"),
+            ("reverse", "BurpSuite", "burp-suite"),
+        ];
+        tools.sort_by_cached_key(|(profile, name, id)| list_sort_key(profile, name, id));
 
-        assert_eq!(ids, ["afrog", "BurpSuite", "burpsuite", "zoxide"]);
+        assert_eq!(
+            tools,
+            [
+                ("crypto", "captf-encoder", "captf-encoder"),
+                ("Crypto", "CyberChef", "cyber-chef"),
+                ("reverse", "BurpSuite", "burp-suite"),
+                ("reverse", "zoxide", "zoxide"),
+            ]
+        );
     }
 }
