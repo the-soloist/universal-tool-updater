@@ -17,7 +17,7 @@ jobs:
     name: Validate release tag
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Match tag to Cargo version
         shell: bash
         run: |
@@ -33,7 +33,7 @@ jobs:
     needs: validate-tag
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
@@ -47,10 +47,17 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          tar -C target/x86_64-unknown-linux-musl/release \
-            -czf "dist/updater-${GITHUB_REF_NAME}-linux.tar.gz" \
-            updater
-      - uses: actions/upload-artifact@v4
+          seven_zip="$(command -v 7zz || command -v 7z || true)"
+          if [[ -z "${seven_zip}" ]]; then
+            echo "error: 7-Zip is not installed" >&2
+            exit 1
+          fi
+          archive="${PWD}/dist/updater-${GITHUB_REF_NAME}-linux.7z"
+          (
+            cd target/x86_64-unknown-linux-musl/release
+            "${seven_zip}" a -t7z -mx=9 "${archive}" updater
+          )
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-x86_64-musl
           path: dist/*
@@ -61,7 +68,7 @@ jobs:
     needs: validate-tag
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
@@ -72,9 +79,26 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          $archive = "dist/updater-$env:GITHUB_REF_NAME-windows.zip"
-          Compress-Archive -Path target/x86_64-pc-windows-msvc/release/updater.exe -DestinationPath $archive
-      - uses: actions/upload-artifact@v4
+          $sevenZipCommand = Get-Command 7z -ErrorAction SilentlyContinue
+          $sevenZip = if ($sevenZipCommand) {
+            $sevenZipCommand.Source
+          } else {
+            Join-Path $env:ProgramFiles '7-Zip\7z.exe'
+          }
+          if (-not (Test-Path $sevenZip)) {
+            throw '7-Zip is not installed'
+          }
+          $archive = Join-Path $PWD "dist/updater-${env:GITHUB_REF_NAME}-windows.7z"
+          Push-Location target/x86_64-pc-windows-msvc/release
+          try {
+            & $sevenZip a -t7z -mx=9 $archive updater.exe
+            if ($LASTEXITCODE -ne 0) {
+              throw "7-Zip exited with code $LASTEXITCODE"
+            }
+          } finally {
+            Pop-Location
+          }
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-x86_64-msvc
           path: dist/*
@@ -85,7 +109,7 @@ jobs:
     needs: validate-tag
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
@@ -95,10 +119,17 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          tar -C target/universal-apple-darwin/release \
-            -czf "dist/updater-${GITHUB_REF_NAME}-macos.tar.gz" \
-            updater
-      - uses: actions/upload-artifact@v4
+          seven_zip="$(command -v 7zz || command -v 7z || true)"
+          if [[ -z "${seven_zip}" ]]; then
+            echo "error: 7-Zip is not installed" >&2
+            exit 1
+          fi
+          archive="${PWD}/dist/updater-${GITHUB_REF_NAME}-macos.7z"
+          (
+            cd target/universal-apple-darwin/release
+            "${seven_zip}" a -t7z -mx=9 "${archive}" updater
+          )
+      - uses: actions/upload-artifact@v7
         with:
           name: macos-universal
           path: dist/*
@@ -112,7 +143,7 @@ jobs:
       - build-macos
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -120,7 +151,7 @@ jobs:
         shell: bash
         run: |
           cd dist
-          sha256sum updater-* > SHA256SUMS
+          sha256sum updater-* > SHA256SUMS.txt
       - name: Create or update release
         env:
           GH_TOKEN: ${{ github.token }}
