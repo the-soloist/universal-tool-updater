@@ -109,7 +109,18 @@ updater update bat --dry-run
 
 # 忽略本地状态
 updater update bat --force
+
+# 只检查 updater 自身是否有新版本
+updater self-update --check
+
+# 下载、验证并安装最新的 updater
+updater self-update
+
+# 重新安装当前 updater release
+updater self-update --force
 ```
+
+`self-update` 独立于 YAML 配置，在当前目录不存在 `profiles/manifest.yaml` 时也可以运行。它会从项目最新的稳定 GitHub Release 选择当前平台的 `updater-vX.Y.Z-<os>.7z`，同时下载 `SHA256SUMS.txt` 并验证 SHA-256；解压后的候选程序还必须通过 `--version` 检查才会替换当前程序。Linux 和 macOS 在可执行文件所在目录原子替换，Windows 使用 updater 自身复制出的临时 Rust helper，在当前进程退出后完成替换和清理。当前支持 Linux x86_64、Windows x86_64，以及 macOS x86_64/aarch64（Universal）。可执行文件所在目录必须可写。
 
 `check` 会加载 `manifest.yaml` 及全部 include profile，但不会访问网络或修改工具目录。它会检查 YAML 语法、必填字段、未知字段、枚举值、网络参数、HTTP(S) URL、HTTP 头、正则表达式、模板占位符、路径安全性和 Hook 参数，同时检查 release 与 artifact 类型、安装参数、工具目录、状态文件、下载目录、事务暂存目录及符号链接之间的冲突。失败时会返回非零退出码，并指出对应配置文件、工具和原因。
 

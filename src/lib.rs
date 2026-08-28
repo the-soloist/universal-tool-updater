@@ -11,6 +11,7 @@ pub mod installer;
 pub mod paths;
 pub(crate) mod progress;
 pub mod resolver;
+pub mod self_update;
 pub mod state;
 #[cfg(test)]
 pub(crate) mod test_support;

@@ -9,29 +9,48 @@ use anyhow::Result;
 
 use crate::cli::{Cli, Command};
 use crate::config;
+use crate::self_update::{self, SelfUpdateOptions};
 
 use report::list_tools;
 use selection::validate_profiles;
 use show::show_distribution;
 use update::{UpdateOptions, update_tools};
 
-pub fn run(cli: Cli) -> Result<()> {
-    if let Some(Command::Migrate { input, output }) = &cli.command {
-        return config::migrate::migrate_directory(input, output);
-    }
-
-    let manifest_path = cli.manifest_path()?;
-    let config = config::load(&manifest_path)?;
-    let profiles = cli.profile;
-    let verbose = cli.verbose;
-    match cli.command.unwrap_or(Command::Update {
+pub fn run(mut cli: Cli) -> Result<()> {
+    let command = cli.command.take().unwrap_or(Command::Update {
         tools: Vec::new(),
         force: false,
         create_missing: false,
         dry_run: false,
         no_progress: false,
         jobs: None,
-    }) {
+    });
+    match &command {
+        Command::Migrate { input, output } => {
+            return config::migrate::migrate_directory(input, output);
+        }
+        Command::SelfUpdate { check, force } => {
+            return self_update::run(SelfUpdateOptions {
+                check_only: *check,
+                force: *force,
+            });
+        }
+        #[cfg(windows)]
+        Command::SelfReplace {
+            target,
+            candidate,
+            version,
+        } => return self_update::replace_helper(target, candidate, version),
+        #[cfg(windows)]
+        Command::SelfCleanup { work_dir } => return self_update::cleanup_helper(work_dir),
+        _ => {}
+    }
+
+    let manifest_path = cli.manifest_path()?;
+    let config = config::load(&manifest_path)?;
+    let profiles = cli.profile;
+    let verbose = cli.verbose;
+    match command {
         Command::Check => {
             validate_profiles(&config, &profiles)?;
             let profile_count = config
@@ -77,6 +96,12 @@ pub fn run(cli: Cli) -> Result<()> {
                 jobs: jobs.map(std::num::NonZeroUsize::get),
             },
         ),
-        Command::Migrate { .. } => unreachable!("handled before loading configuration"),
+        Command::Migrate { .. } | Command::SelfUpdate { .. } => {
+            unreachable!("handled before loading configuration")
+        }
+        #[cfg(windows)]
+        Command::SelfReplace { .. } | Command::SelfCleanup { .. } => {
+            unreachable!("handled before loading configuration")
+        }
     }
 }

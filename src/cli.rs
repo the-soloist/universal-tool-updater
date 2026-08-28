@@ -81,6 +81,35 @@ pub enum Command {
         #[arg(long)]
         output: PathBuf,
     },
+
+    /// Check for and install a newer updater release.
+    SelfUpdate {
+        /// Only report whether an update is available.
+        #[arg(long)]
+        check: bool,
+
+        /// Reinstall the current release when it is already installed.
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    #[cfg(windows)]
+    #[command(name = "__self-replace", hide = true)]
+    SelfReplace {
+        #[arg(long)]
+        target: PathBuf,
+        #[arg(long)]
+        candidate: PathBuf,
+        #[arg(long)]
+        version: String,
+    },
+
+    #[cfg(windows)]
+    #[command(name = "__self-cleanup", hide = true)]
+    SelfCleanup {
+        #[arg(long)]
+        work_dir: PathBuf,
+    },
 }
 
 impl Cli {
@@ -177,5 +206,17 @@ mod tests {
             }) if value.get() == 3
         ));
         assert!(Cli::try_parse_from(["updater", "update", "--jobs", "0"]).is_err());
+    }
+
+    #[test]
+    fn parses_self_update_without_profile_arguments() {
+        let cli = Cli::try_parse_from(["updater", "self-update", "--check"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::SelfUpdate {
+                check: true,
+                force: false
+            })
+        ));
     }
 }
