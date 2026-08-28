@@ -1,11 +1,8 @@
+use crate::domain::Tool;
+use crate::error::UpdaterError;
 use anyhow::Result;
 use chardetng::EncodingDetector;
 use reqwest::blocking::{Client, Response};
-use url::Url;
-
-use crate::domain::Tool;
-use crate::error::UpdaterError;
-use crate::paths::safe_filename;
 
 pub(super) fn get_text(client: &Client, tool: &Tool, url: &str) -> Result<String> {
     let response = client
@@ -29,14 +26,6 @@ pub(super) fn decode(bytes: &[u8]) -> String {
     let encoding = detector.guess(None, true);
     let (decoded, _, _) = encoding.decode(bytes);
     decoded.into_owned()
-}
-
-pub(super) fn filename_from_url(value: &str) -> Option<String> {
-    Url::parse(value).ok().and_then(|url| {
-        url.path_segments()
-            .and_then(|mut parts| parts.next_back())
-            .and_then(safe_filename)
-    })
 }
 
 pub(super) fn incompatible_artifact(tool: &Tool, artifact: &str) -> UpdaterError {

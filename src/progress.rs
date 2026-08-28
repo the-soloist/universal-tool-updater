@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use console::Term;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use unicode_width::UnicodeWidthChar;
+
+use crate::display::{pad_right, truncate, width as display_width};
 
 pub(crate) struct ProgressManager {
     multi: MultiProgress,
@@ -234,12 +235,12 @@ fn task_prefix(profile: &str, name: &str, terminal_width: usize) -> String {
         .min(if budget >= 30 { 12 } else { 10 })
         .min(content_budget.saturating_sub(minimum_name_width))
         .max(1);
-    let profile = truncate_display(profile, profile_budget);
+    let profile = truncate(profile, profile_budget);
     let name_budget = content_budget
         .saturating_sub(display_width(&profile))
         .max(1);
-    let name = truncate_display(name, name_budget);
-    let mut prefix = pad_display_right(format!("[{profile}] {name}"), budget.saturating_sub(2));
+    let name = truncate(name, name_budget);
+    let mut prefix = pad_right(&format!("[{profile}] {name}"), budget.saturating_sub(2));
     prefix.push_str(" ›");
     prefix
 }
@@ -256,11 +257,6 @@ fn prefix_budget(terminal_width: usize) -> usize {
     }
 }
 
-fn pad_display_right(mut value: String, width: usize) -> String {
-    value.push_str(&" ".repeat(width.saturating_sub(display_width(&value))));
-    value
-}
-
 fn current_terminal_width() -> usize {
     Term::stderr().size().1 as usize
 }
@@ -269,41 +265,10 @@ fn style(template: &str) -> ProgressStyle {
     ProgressStyle::with_template(template).expect("static progress template")
 }
 
-fn truncate_display(value: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-    if display_width(value) <= max_width {
-        return value.to_owned();
-    }
-    let available = max_width.saturating_sub(1);
-    let mut width = 0;
-    let mut output = String::new();
-    for character in value.chars() {
-        let character_width = character.width().unwrap_or(0);
-        if width + character_width > available {
-            break;
-        }
-        output.push(character);
-        width += character_width;
-    }
-    output.push('…');
-    output
-}
-
-fn display_width(value: &str) -> usize {
-    value
-        .chars()
-        .map(|character| character.width().unwrap_or(0))
-        .sum()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        display_width, download_label, prefix_budget, split_download_width, task_prefix,
-        truncate_display,
-    };
+    use super::{download_label, prefix_budget, split_download_width, task_prefix};
+    use crate::display::width as display_width;
 
     #[test]
     fn adapts_profile_and_name_space_to_terminal_width() {
@@ -322,12 +287,6 @@ mod tests {
             display_width(&task_prefix("企业版", "哈希值批量计算器", 80)),
             22
         );
-    }
-
-    #[test]
-    fn truncates_wide_names_by_display_width() {
-        assert_eq!(truncate_display("哈希值批量计算器", 8), "哈希值…");
-        assert_eq!(truncate_display("ripgrep", 12), "ripgrep");
     }
 
     #[test]

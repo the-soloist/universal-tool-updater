@@ -96,3 +96,20 @@ post_unpack = "./scripts/demo.bat"
             .contains("only permits Python external scripts")
     );
 }
+
+#[test]
+fn rejects_legacy_files_without_tools() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("linux");
+    let output = directory.path().join("v5");
+    fs::create_dir(&input).unwrap();
+    fs::write(
+        input.join("empty.toml"),
+        "[UpdaterConfig]\ndisable_repack = true\n",
+    )
+    .unwrap();
+
+    let error = migrate_directory(&input, &output).unwrap_err();
+
+    assert!(error.to_string().contains("contains no tools"));
+}

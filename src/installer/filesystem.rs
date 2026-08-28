@@ -1,7 +1,7 @@
 use std::fs::{self, FileType};
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use walkdir::WalkDir;
 
 use crate::domain::Tool;
@@ -69,12 +69,39 @@ pub(super) fn apply_executable_bits(tool: &Tool, root: &Path) -> Result<()> {
 }
 
 pub(super) fn remove_path(path: &Path) -> Result<()> {
-    if path.is_dir() && !path.is_symlink() {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("cannot inspect {}", path.display()));
+        }
+    };
+    if metadata.file_type().is_dir() {
         fs::remove_dir_all(path)?;
-    } else if path.exists() || path.is_symlink() {
+    } else {
         fs::remove_file(path)?;
     }
     Ok(())
+}
+
+pub(super) fn path_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("cannot inspect {}", path.display())),
+    }
+}
+
+pub(super) fn remove_file_symlink(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            fs::remove_file(path)?;
+            Ok(())
+        }
+        Ok(_) => anyhow::bail!("refusing to remove non-symlink {}", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("cannot inspect {}", path.display())),
+    }
 }
 
 #[cfg(unix)]
@@ -119,7 +146,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{copy_tree, single_directory_base};
+    use super::{copy_tree, path_exists, remove_path, single_directory_base};
 
     #[test]
     fn copies_and_flattens_single_directory_trees() {
@@ -134,5 +161,20 @@ mod tests {
             fs::read_to_string(destination.join("inner/tool")).unwrap(),
             "ok"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handles_missing_paths_and_dangling_symlinks() {
+        let directory = tempdir().unwrap();
+        let missing = directory.path().join("missing");
+        let dangling = directory.path().join("dangling");
+        std::os::unix::fs::symlink(&missing, &dangling).unwrap();
+
+        assert!(!path_exists(&missing).unwrap());
+        assert!(path_exists(&dangling).unwrap());
+        remove_path(&dangling).unwrap();
+        remove_path(&missing).unwrap();
+        assert!(!path_exists(&dangling).unwrap());
     }
 }

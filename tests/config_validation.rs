@@ -131,7 +131,27 @@ defaults:
 }
 
 #[test]
-fn uses_save_for_global_output_mode_and_accepts_the_legacy_alias() {
+fn rejects_state_nested_inside_the_staging_directory() {
+    let directory = tempdir().unwrap();
+    let toolkit = yaml_path(directory.path());
+    let staging = yaml_path(&directory.path().join("transactions"));
+    let state = yaml_path(&directory.path().join("transactions/state.yaml"));
+    let manifest = format!(
+        r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: '{toolkit}'
+  staging: '{staging}'
+  state: '{state}'
+"#
+    );
+
+    assert_invalid_manifest(&manifest, "paths.staging");
+}
+
+#[test]
+fn uses_save_for_global_output_mode_and_rejects_the_legacy_alias() {
     let manifest: ManifestFile = yaml_serde::from_str(
         r#"
 schema_version: 5
@@ -140,7 +160,7 @@ paths:
   toolkit_root: ~/Tools/Toolkit
 defaults:
   install:
-    output: archive
+    save: archive
 "#,
     )
     .unwrap();
@@ -149,6 +169,17 @@ defaults:
     let encoded = yaml_serde::to_string(&manifest).unwrap();
     assert!(encoded.contains("save: archive"));
     assert!(!encoded.contains("output:"));
+
+    let legacy = r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: ~/Tools/Toolkit
+defaults:
+  install:
+    output: archive
+"#;
+    assert!(yaml_serde::from_str::<ManifestFile>(legacy).is_err());
 }
 
 #[test]
@@ -592,6 +623,29 @@ tools:
 "#,
         "conflicts with paths.staging",
     );
+    assert_invalid_tool_with_manifest(
+        r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: ~/Tools/Toolkit
+  state: .updater/../Demo/.version
+"#,
+        r#"
+tools:
+  demo:
+    release:
+      type: github
+      repository: owner/demo
+    artifacts:
+      - type: github-asset
+        pattern: demo.exe
+    install:
+      destination: Demo
+      input: copy
+"#,
+        "version marker",
+    );
 }
 
 #[test]
@@ -671,6 +725,33 @@ tools:
 "#,
         "share symlink target",
     );
+    assert_invalid_tool(
+        r#"
+tools:
+  alpha:
+    release:
+      type: github
+      repository: owner/alpha
+    artifacts:
+      - type: github-asset
+        pattern: alpha
+    install:
+      destination: Shared
+  beta:
+    release:
+      type: github
+      repository: owner/beta
+    artifacts:
+      - type: github-asset
+        pattern: beta
+    install:
+      destination: Beta
+      symlinks:
+        - from: beta
+          to: shared/beta
+"#,
+        "conflicts with tool alpha destination",
+    );
 }
 
 #[test]
@@ -695,9 +776,93 @@ tools:
       - type: github-asset
         pattern: beta
     install:
-      destination: Shared/Beta
+      destination: shared/Beta
 "#,
         "overlapping destinations",
+    );
+}
+
+#[test]
+fn rejects_destinations_that_collide_with_transaction_backups() {
+    assert_invalid_tool(
+        r#"
+tools:
+  alpha:
+    release:
+      type: github
+      repository: owner/alpha
+    artifacts:
+      - type: github-asset
+        pattern: alpha
+    install:
+      destination: Shared
+  beta:
+    release:
+      type: github
+      repository: owner/beta
+    artifacts:
+      - type: github-asset
+        pattern: beta
+    install:
+      destination: Shared.utu-backup
+"#,
+        "transaction backup",
+    );
+}
+
+#[test]
+fn rejects_reserved_paths_that_collide_with_transaction_backups() {
+    assert_invalid_tool_with_manifest(
+        r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+  downloads: updates
+  state: Demo.utu-backup
+"#,
+        r#"
+tools:
+  demo:
+    release:
+      type: github
+      repository: owner/demo
+    artifacts:
+      - type: github-asset
+        pattern: demo
+    install:
+      destination: Demo
+"#,
+        "transaction backup",
+    );
+}
+
+#[test]
+fn rejects_destinations_that_conflict_with_external_version_markers() {
+    assert_invalid_tool(
+        r#"
+tools:
+  copied:
+    release:
+      type: github
+      repository: owner/copied
+    artifacts:
+      - type: github-asset
+        pattern: copied.exe
+    install:
+      destination: Shared
+      input: copy
+  marker-owner:
+    release:
+      type: github
+      repository: owner/marker-owner
+    artifacts:
+      - type: github-asset
+        pattern: marker-owner.zip
+    install:
+      destination: Shared/.version
+"#,
+        "conflicts with tool copied version marker",
     );
 }
 
@@ -715,6 +880,10 @@ paths:
         tool_file,
         expected,
     );
+}
+
+fn yaml_path(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\'', "''")
 }
 
 fn assert_invalid_manifest(manifest: &str, expected: &str) {

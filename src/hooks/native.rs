@@ -40,12 +40,7 @@ pub(super) fn rename_one(root: &Path, from: &str, to: &Path) -> Result<()> {
     if source == &destination {
         return Ok(());
     }
-    if fs::symlink_metadata(&destination).is_ok() {
-        bail!(
-            "rename destination {} already exists",
-            destination.display()
-        );
-    }
+    require_missing(&destination, "rename destination")?;
     fs::rename(source, &destination).with_context(|| {
         format!(
             "cannot rename {} to {}",
@@ -79,9 +74,7 @@ pub(super) fn move_contents(root: &Path, from: &Path, to: &Path) -> Result<()> {
     let entries = fs::read_dir(&source)?.collect::<std::result::Result<Vec<_>, _>>()?;
     for entry in &entries {
         let target = destination.join(entry.file_name());
-        if fs::symlink_metadata(&target).is_ok() {
-            bail!("move-contents target {} already exists", target.display());
-        }
+        require_missing(&target, "move-contents target")?;
     }
     for entry in entries {
         let target = destination.join(entry.file_name());
@@ -96,6 +89,16 @@ pub(super) fn move_contents(root: &Path, from: &Path, to: &Path) -> Result<()> {
     fs::remove_dir(&source)
         .with_context(|| format!("cannot remove empty source {}", source.display()))?;
     Ok(())
+}
+
+fn require_missing(path: &Path, description: &str) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => bail!("{description} {} already exists", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("cannot inspect {description} {}", path.display()))
+        }
+    }
 }
 
 fn wildcard_regex(pattern: &str) -> Result<Regex> {

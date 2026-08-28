@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use tempfile::tempdir;
@@ -98,6 +99,97 @@ fn extracts_rar5_with_the_rust_backend() {
         fs::read_to_string(output_path.join("folder/tool.txt")).unwrap(),
         "rust-native-rar"
     );
+}
+
+#[test]
+fn extracts_all_tar_and_single_stream_formats() {
+    let directory = tempdir().unwrap();
+    let tar = tar_fixture();
+    let archives = [
+        ("tool.tar.gz", gzip(&tar)),
+        ("tool.tar.bz2", bzip2(&tar)),
+        ("tool.tar.xz", xz(&tar)),
+    ];
+    for (name, contents) in archives {
+        let archive = directory.path().join(name);
+        let output = directory.path().join(format!("output-{name}"));
+        fs::write(&archive, contents).unwrap();
+        ArchiveService.extract(&archive, &output, None).unwrap();
+        assert_eq!(
+            fs::read_to_string(output.join("bin/tool.txt")).unwrap(),
+            "payload",
+            "failed to extract {name}"
+        );
+    }
+
+    for (name, contents) in [
+        ("tool.bin.gz", gzip(b"payload")),
+        ("tool.bin.xz", xz(b"payload")),
+    ] {
+        let archive = directory.path().join(name);
+        let output = directory.path().join(format!("output-{name}"));
+        fs::write(&archive, contents).unwrap();
+        ArchiveService.extract(&archive, &output, None).unwrap();
+        assert_eq!(
+            fs::read_to_string(output.join("tool.bin")).unwrap(),
+            "payload",
+            "failed to extract {name}"
+        );
+    }
+}
+
+#[test]
+fn recognizes_every_documented_archive_extension_case_insensitively() {
+    for name in [
+        "tool.ZIP",
+        "tool.RAR",
+        "tool.7Z",
+        "tool.tar.gz",
+        "tool.tar.bz2",
+        "tool.tar.xz",
+        "tool.tgz",
+        "tool.tbz",
+        "tool.txz",
+        "tool.gz",
+        "tool.xz",
+    ] {
+        assert!(ArchiveService.is_supported(Path::new(name)), "{name}");
+    }
+    assert!(!ArchiveService.is_supported(Path::new("tool.exe")));
+}
+
+fn tar_fixture() -> Vec<u8> {
+    let mut output = Vec::new();
+    {
+        let mut archive = tar::Builder::new(&mut output);
+        let contents = b"payload";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("bin/tool.txt").unwrap();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        archive.append(&header, contents.as_slice()).unwrap();
+        archive.finish().unwrap();
+    }
+    output
+}
+
+fn gzip(contents: &[u8]) -> Vec<u8> {
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(contents).unwrap();
+    encoder.finish().unwrap()
+}
+
+fn bzip2(contents: &[u8]) -> Vec<u8> {
+    let mut encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+    encoder.write_all(contents).unwrap();
+    encoder.finish().unwrap()
+}
+
+fn xz(contents: &[u8]) -> Vec<u8> {
+    let mut encoder = xz2::write::XzEncoder::new(Vec::new(), 6);
+    encoder.write_all(contents).unwrap();
+    encoder.finish().unwrap()
 }
 
 fn stored_rar5(filename: &str, content: &[u8]) -> Vec<u8> {

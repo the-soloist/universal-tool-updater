@@ -58,6 +58,9 @@ pub fn migrate_directory(input: &Path, output: &Path) -> Result<()> {
             let id = unique_tool_id(convert::tool_id(name, legacy_tool), &mut used_ids);
             tools.insert(id, convert::convert_tool(name, legacy_tool)?);
         }
+        if tools.is_empty() {
+            bail!("legacy config {} contains no tools", path.display());
+        }
         let filename = path
             .with_extension("yaml")
             .file_name()
@@ -93,8 +96,9 @@ pub fn migrate_directory(input: &Path, output: &Path) -> Result<()> {
 
 fn legacy_files(input: &Path) -> Result<Vec<PathBuf>> {
     let mut files = fs::read_dir(input)?
-        .filter_map(std::result::Result::ok)
-        .map(|entry| entry.path())
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
         .filter(|path| {
             path.extension().and_then(|value| value.to_str()) == Some("toml")
                 && path.file_name().and_then(|value| value.to_str()) != Some("manifest.toml")

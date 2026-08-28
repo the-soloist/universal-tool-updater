@@ -1,5 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 
+use url::Url;
+
 use crate::error::UpdaterError;
 
 pub fn expand_path(raw: &Path) -> Result<PathBuf, UpdaterError> {
@@ -18,19 +20,90 @@ pub fn expand_path(raw: &Path) -> Result<PathBuf, UpdaterError> {
 
 pub fn resolve_from(base: &Path, raw: &Path) -> Result<PathBuf, UpdaterError> {
     let expanded = expand_path(raw)?;
-    if expanded.is_absolute() {
-        Ok(expanded)
+    let resolved = if expanded.is_absolute() {
+        expanded
     } else {
-        Ok(base.join(expanded))
+        base.join(expanded)
+    };
+    Ok(normalize_path(&resolved))
+}
+
+pub(crate) fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if normalized
+                    .components()
+                    .next_back()
+                    .is_some_and(|component| matches!(component, Component::Normal(_)))
+                {
+                    normalized.pop();
+                } else if !normalized.has_root() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+        }
     }
+    normalized
+}
+
+pub(crate) fn installation_backup_path(path: &Path) -> Option<PathBuf> {
+    let mut name = path.file_name()?.to_os_string();
+    name.push(".utu-backup");
+    Some(path.with_file_name(name))
 }
 
 pub fn safe_filename(value: &str) -> Option<String> {
     Path::new(value)
         .file_name()
         .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty() && *name != "." && *name != "..")
+        .filter(|name| is_portable_filename(Path::new(name)))
         .map(ToOwned::to_owned)
+}
+
+pub(crate) fn filename_from_url(value: &str) -> Option<String> {
+    Url::parse(value).ok().and_then(|url| {
+        url.path_segments()
+            .and_then(|mut parts| parts.next_back())
+            .and_then(|name| {
+                decode_url_component(name)
+                    .as_deref()
+                    .and_then(safe_filename)
+                    .or_else(|| safe_filename(name))
+            })
+    })
+}
+
+pub(crate) fn decode_url_component(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = hex(bytes.get(index + 1).copied()?)?;
+            let low = hex(bytes.get(index + 2).copied()?)?;
+            decoded.push((high << 4) | low);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn hex(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }
 
 pub fn is_portable_filename(path: &Path) -> bool {
@@ -89,14 +162,24 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        is_portable_filename, is_portable_filename_pattern, is_portable_relative_path,
-        safe_filename,
+        filename_from_url, installation_backup_path, is_portable_filename,
+        is_portable_filename_pattern, is_portable_relative_path, normalize_path, safe_filename,
     };
 
     #[test]
     fn removes_parent_components_from_filenames() {
         assert_eq!(safe_filename("../../tool.zip").as_deref(), Some("tool.zip"));
         assert_eq!(safe_filename(".."), None);
+        assert_eq!(safe_filename("CON.txt"), None);
+        assert_eq!(safe_filename("invalid:name.zip"), None);
+        assert_eq!(
+            filename_from_url("https://example.com/releases/tool.zip?download=1").as_deref(),
+            Some("tool.zip")
+        );
+        assert_eq!(
+            filename_from_url("https://example.com/releases/%E5%B7%A5%E5%85%B7.zip").as_deref(),
+            Some("工具.zip")
+        );
     }
 
     #[test]
@@ -116,5 +199,14 @@ mod tests {
             Path::new("bin/trailing."),
             false
         ));
+        assert_eq!(
+            normalize_path(Path::new("/Toolkit/.updater/../Demo/.version")),
+            Path::new("/Toolkit/Demo/.version")
+        );
+        assert_eq!(
+            installation_backup_path(Path::new("/Toolkit/Demo")),
+            Some(Path::new("/Toolkit/Demo.utu-backup").to_path_buf())
+        );
+        assert_eq!(installation_backup_path(Path::new("/")), None);
     }
 }

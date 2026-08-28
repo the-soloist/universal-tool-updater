@@ -1,11 +1,10 @@
 use std::fmt::Write as _;
 
+use crate::config::AppConfig;
+use crate::display::{pad_right, width as display_width};
+use crate::domain::{UpdateResult, UpdateStatus};
 use anyhow::Result;
 use console::{Style, Term};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-
-use crate::config::AppConfig;
-use crate::domain::{UpdateResult, UpdateStatus};
 
 use super::selection::validate_profiles;
 
@@ -179,32 +178,7 @@ fn status_style(status: UpdateStatus, color: bool) -> Style {
 }
 
 fn pad_display(value: &str, width: usize) -> String {
-    let mut value = truncate_display(value, width);
-    value.push_str(&" ".repeat(width.saturating_sub(display_width(&value))));
-    value
-}
-
-fn truncate_display(value: &str, max_width: usize) -> String {
-    if display_width(value) <= max_width {
-        return value.to_owned();
-    }
-    if max_width == 0 {
-        return String::new();
-    }
-
-    let available = max_width.saturating_sub(1);
-    let mut width = 0;
-    let mut truncated = String::new();
-    for character in value.chars() {
-        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
-        if width + character_width > available {
-            break;
-        }
-        width += character_width;
-        truncated.push(character);
-    }
-    truncated.push('…');
-    truncated
+    pad_right(value, width)
 }
 
 fn wrap_display(value: &str, max_width: usize) -> Vec<String> {
@@ -243,7 +217,7 @@ fn split_index(value: &str, max_width: usize) -> usize {
     let mut width = 0;
     let mut index = 0;
     for (offset, character) in value.char_indices() {
-        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        let character_width = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
         if width + character_width > max_width && index != 0 {
             break;
         }
@@ -256,15 +230,13 @@ fn split_index(value: &str, max_width: usize) -> usize {
     index.max(value.chars().next().map(char::len_utf8).unwrap_or(0))
 }
 
-fn display_width(value: &str) -> usize {
-    UnicodeWidthStr::width(value)
-}
-
 #[cfg(test)]
 mod tests {
     use crate::domain::{UpdateResult, UpdateStatus};
 
-    use super::{display_width, list_sort_key, render_summary};
+    use crate::display::width as display_width;
+
+    use super::{list_sort_key, render_summary};
 
     #[test]
     fn tools_are_sorted_by_profile_then_name_case_insensitively() {

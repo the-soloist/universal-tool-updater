@@ -117,13 +117,28 @@ impl ToolWorkspace {
     }
 
     pub(crate) fn clear_partials(&self) -> Result<()> {
-        if self.partials.exists() {
-            fs::remove_dir_all(&self.partials).with_context(|| {
-                format!(
-                    "cannot clear partial download directory {}",
-                    self.partials.display()
-                )
-            })?;
+        match fs::symlink_metadata(&self.partials) {
+            Ok(metadata) if metadata.file_type().is_dir() => {
+                fs::remove_dir_all(&self.partials).with_context(|| {
+                    format!(
+                        "cannot clear partial download directory {}",
+                        self.partials.display()
+                    )
+                })?;
+            }
+            Ok(_) => anyhow::bail!(
+                "partial download path {} is not a directory",
+                self.partials.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "cannot inspect partial download directory {}",
+                        self.partials.display()
+                    )
+                });
+            }
         }
         Ok(())
     }
@@ -141,12 +156,10 @@ impl Drop for ToolWorkspace {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
 
     use tempfile::tempdir;
 
-    use crate::config::model::{ArtifactConfig, HookConfig, ReleaseConfig};
-    use crate::domain::{ExistingPolicy, InputMode, InstallSpec, OutputMode, Tool};
+    use crate::test_support::tool;
 
     use super::RunWorkspace;
 
@@ -159,8 +172,8 @@ mod tests {
         let partial_path;
         {
             let run = RunWorkspace::create(root.path(), &staging).unwrap();
-            let first = run.prepare(&tool("first")).unwrap();
-            let second = run.prepare(&tool("second")).unwrap();
+            let first = run.prepare(&tool("first", "first")).unwrap();
+            let second = run.prepare(&tool("second", "second")).unwrap();
             run_path = first
                 .downloads()
                 .parent()
@@ -190,34 +203,5 @@ mod tests {
         assert!(!run_path.exists());
         assert!(!staging_run_path.exists());
         assert_eq!(fs::read_to_string(partial_path).unwrap(), "partial");
-    }
-
-    fn tool(id: &str) -> Tool {
-        Tool {
-            id: id.to_owned(),
-            name: id.to_owned(),
-            profile: "test".to_owned(),
-            enabled: true,
-            release: ReleaseConfig::Github {
-                repository: "owner/repository".to_owned(),
-                ignore_versions: Vec::new(),
-            },
-            artifacts: vec![ArtifactConfig::GithubAsset {
-                pattern: "artifact".to_owned(),
-            }],
-            install: InstallSpec {
-                destination: PathBuf::from(id),
-                input: InputMode::Copy,
-                existing: ExistingPolicy::Replace,
-                save: OutputMode::Directory,
-                strip_single_root: true,
-                create_destination: true,
-                archive_name: "{name}-{version}.7z".to_owned(),
-                archive_password: None,
-                executable: Vec::new(),
-                symlinks: Vec::new(),
-            },
-            hooks: HookConfig::default(),
-        }
     }
 }

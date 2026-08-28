@@ -6,7 +6,7 @@ use toml::Value;
 
 use crate::config::model::{
     ArtifactConfig, ExistingPolicy, HookAction, HookConfig, HookWorkingDirectory, InputMode,
-    InstallConfig, OutputMode, ReleaseConfig, SymlinkConfig, ToolConfig,
+    InstallConfig, OutputMode, ReleaseConfig, SCHEMA_VERSION, SymlinkConfig, ToolConfig,
 };
 
 pub(super) fn convert_tool(
@@ -142,7 +142,7 @@ fn hook(table: &toml::map::Map<String, Value>, field: &str, tool: &str) -> Resul
         .is_none_or(|extension| !extension.eq_ignore_ascii_case("py"))
     {
         bail!(
-            "tool {tool}: legacy hook {field} uses {}; schema v4 only permits Python external scripts; convert simple file operations to native actions",
+            "tool {tool}: legacy hook {field} uses {}; schema v{SCHEMA_VERSION} only permits Python external scripts; convert simple file operations to native actions",
             script.display()
         );
     }

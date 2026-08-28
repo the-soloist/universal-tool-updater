@@ -65,7 +65,6 @@ impl Default for DefaultsConfig {
 pub struct InstallDefaults {
     pub input: InputMode,
     pub existing: ExistingPolicy,
-    #[serde(alias = "output")]
     pub save: OutputMode,
     pub strip_single_root: bool,
     pub archive_name: String,
@@ -120,7 +119,6 @@ pub struct InstallConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub existing: Option<ExistingPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(alias = "output")]
     pub save: Option<OutputMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strip_single_root: Option<bool>,

@@ -37,23 +37,26 @@ pub struct ToolState {
 impl StateStore {
     pub fn load(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
-        let data = if path.exists() {
-            let input = fs::read_to_string(&path)
-                .with_context(|| format!("cannot read state file {}", path.display()))?;
-            let state: StateFile = yaml_serde::from_str(&input)
-                .with_context(|| format!("invalid state file {}", path.display()))?;
-            if state.schema_version != STATE_VERSION {
-                anyhow::bail!(
-                    "unsupported state schema {} in {}; expected {STATE_VERSION}",
-                    state.schema_version,
-                    path.display()
-                );
+        let data = match fs::read_to_string(&path) {
+            Ok(input) => {
+                let state: StateFile = yaml_serde::from_str(&input)
+                    .with_context(|| format!("invalid state file {}", path.display()))?;
+                if state.schema_version != STATE_VERSION {
+                    anyhow::bail!(
+                        "unsupported state schema {} in {}; expected {STATE_VERSION}",
+                        state.schema_version,
+                        path.display()
+                    );
+                }
+                state
             }
-            state
-        } else {
-            StateFile {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => StateFile {
                 schema_version: STATE_VERSION,
                 tools: BTreeMap::new(),
+            },
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("cannot read state file {}", path.display()));
             }
         };
         Ok(Self { path, data })
@@ -71,14 +74,22 @@ impl StateStore {
             .duration_since(UNIX_EPOCH)
             .context("system time is before Unix epoch")?
             .as_secs();
-        self.data.tools.insert(
+        let previous = self.data.tools.insert(
             tool_id.to_owned(),
             ToolState {
                 version: version.to_owned(),
                 updated_at,
             },
         );
-        self.save()
+        if let Err(error) = self.save() {
+            if let Some(previous) = previous {
+                self.data.tools.insert(tool_id.to_owned(), previous);
+            } else {
+                self.data.tools.remove(tool_id);
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn save(&self) -> Result<()> {
@@ -119,5 +130,23 @@ mod tests {
 
         let reloaded = StateStore::load(&path).unwrap();
         assert_eq!(reloaded.version("bat"), Some("v1.2.3"));
+    }
+
+    #[test]
+    fn restores_in_memory_state_when_persistence_fails() {
+        let directory = tempdir().unwrap();
+        let parent = directory.path().join("state");
+        let path = parent.join("state.yaml");
+        let mut state = StateStore::load(&path).unwrap();
+        std::fs::write(&parent, "blocks directory creation").unwrap();
+
+        assert!(state.record("failed", "v1").is_err());
+        assert_eq!(state.version("failed"), None);
+
+        std::fs::remove_file(&parent).unwrap();
+        state.record("working", "v2").unwrap();
+        let reloaded = StateStore::load(path).unwrap();
+        assert_eq!(reloaded.version("failed"), None);
+        assert_eq!(reloaded.version("working"), Some("v2"));
     }
 }

@@ -1,19 +1,19 @@
-use std::collections::BTreeMap;
+mod paths;
+mod registry;
+mod tool;
+
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::config::model::{
-    DefaultsConfig, InstallConfig, ManifestFile, SCHEMA_VERSION, ToolConfig, ToolFile,
-};
-use crate::config::validation::{
-    validate_install_spec, validate_manifest_values, validate_tool_config,
-};
-use crate::config::{AppConfig, Paths};
-use crate::domain::{InputMode, InstallSpec, SymlinkSpec, Tool};
+use crate::config::AppConfig;
+use crate::config::model::{ManifestFile, SCHEMA_VERSION, ToolFile};
+use crate::config::validation::{validate_manifest_values, validate_tool_config};
 use crate::error::UpdaterError;
-use crate::paths::{expand_path, is_portable_relative_path, resolve_from};
+
+use paths::{profile_name, resolve_include, resolve_manifest_path, resolve_paths};
+use registry::ToolRegistry;
 
 pub fn load(manifest_path: &Path) -> Result<AppConfig> {
     let app_root = std::env::current_dir().context("cannot determine the working directory")?;
@@ -23,90 +23,24 @@ pub fn load(manifest_path: &Path) -> Result<AppConfig> {
     let paths = resolve_paths(&app_root, &manifest_path, &manifest)?;
 
     let manifest_dir = manifest_path.parent().unwrap_or(Path::new("."));
-    let mut tools = BTreeMap::new();
-    let mut profiles = BTreeMap::<String, PathBuf>::new();
-    let mut destinations = BTreeMap::<PathBuf, String>::new();
-    let mut symlink_targets = BTreeMap::<PathBuf, String>::new();
+    let mut registry = ToolRegistry::default();
     for include in &manifest.include {
         let path = resolve_include(&manifest_path, manifest_dir, include)?;
         let profile = profile_name(&path)?;
-        if let Some(previous) = profiles.insert(profile.clone(), path.clone()) {
-            return Err(UpdaterError::config(
-                &manifest_path,
-                format!(
-                    "include files {} and {} define the same profile {profile}",
-                    previous.display(),
-                    path.display()
-                ),
-            )
-            .into());
-        }
+        registry.add_profile(&manifest_path, &path, &profile)?;
         let tool_file: ToolFile = read_yaml(&path)?;
         if tool_file.tools.is_empty() {
             return Err(UpdaterError::config(&path, "tools must not be empty").into());
         }
         for (id, raw) in tool_file.tools {
             validate_tool_config(&path, &id, &raw, &app_root)?;
-            if tools.contains_key(&id) {
-                return Err(UpdaterError::config(&path, format!("duplicate tool id {id}")).into());
-            }
-            let tool = materialize_tool(
-                &path,
-                id.clone(),
-                profile.clone(),
-                raw,
-                &manifest.defaults,
-                &paths,
-            )?;
-            validate_runtime_path_conflicts(&path, &tool, &paths)?;
-            if let Some((destination, previous)) = destinations.iter().find(|(destination, _)| {
-                tool.install.destination.starts_with(destination)
-                    || destination.starts_with(&tool.install.destination)
-            }) {
-                return Err(UpdaterError::config(
-                    &path,
-                    format!(
-                        "tools {previous} and {id} have overlapping destinations {} and {}",
-                        destination.display(),
-                        tool.install.destination.display(),
-                    ),
-                )
-                .into());
-            }
-            destinations.insert(tool.install.destination.clone(), id.clone());
-            for link in &tool.install.symlinks {
-                if let Some(previous) = symlink_targets.insert(link.to.clone(), id.clone()) {
-                    return Err(UpdaterError::config(
-                        &path,
-                        format!(
-                            "tools {previous} and {id} share symlink target {}",
-                            link.to.display()
-                        ),
-                    )
-                    .into());
-                }
-            }
-            tools.insert(id, tool);
+            registry.ensure_unique_id(&path, &id)?;
+            let tool =
+                tool::materialize(&path, id, profile.clone(), raw, &manifest.defaults, &paths)?;
+            registry.insert(&path, tool)?;
         }
     }
-
-    for (target, owner) in &symlink_targets {
-        if let Some((destination, destination_owner)) = destinations
-            .iter()
-            .find(|(_, destination_owner)| *destination_owner != owner)
-            .filter(|(destination, _)| target.starts_with(destination))
-        {
-            return Err(UpdaterError::config(
-                &manifest_path,
-                format!(
-                    "tool {owner} symlink target {} overlaps tool {destination_owner} destination {}",
-                    target.display(),
-                    destination.display()
-                ),
-            )
-            .into());
-        }
-    }
+    let tools = registry.finish();
 
     Ok(AppConfig {
         app_root,
@@ -114,14 +48,6 @@ pub fn load(manifest_path: &Path) -> Result<AppConfig> {
         network: manifest.network,
         tools,
     })
-}
-
-fn resolve_manifest_path(app_root: &Path, manifest_path: &Path) -> PathBuf {
-    if manifest_path.is_absolute() {
-        manifest_path.to_path_buf()
-    } else {
-        app_root.join(manifest_path)
-    }
 }
 
 fn validate_manifest(path: &Path, manifest: &ManifestFile) -> Result<()> {
@@ -141,226 +67,6 @@ fn validate_manifest(path: &Path, manifest: &ManifestFile) -> Result<()> {
     validate_manifest_values(path, manifest)
 }
 
-fn resolve_paths(app_root: &Path, manifest_path: &Path, manifest: &ManifestFile) -> Result<Paths> {
-    let toolkit_root = resolve_from(app_root, &manifest.paths.toolkit_root)?;
-    let updater_root = updater_directory()?;
-    let downloads = resolve_setting_path(&updater_root, &manifest.paths.downloads)?;
-    let staging = manifest
-        .paths
-        .staging
-        .as_deref()
-        .map(|path| resolve_setting_path(&updater_root, path))
-        .transpose()?
-        .unwrap_or_else(|| downloads.join("staging"));
-    let state = resolve_setting_path(&toolkit_root, &manifest.paths.state)?;
-    if staging == state || staging.starts_with(&state) {
-        return Err(UpdaterError::config(
-            manifest_path,
-            format!(
-                "paths.staging {} conflicts with paths.state {}",
-                staging.display(),
-                state.display()
-            ),
-        )
-        .into());
-    }
-    Ok(Paths {
-        downloads,
-        staging,
-        state,
-        toolkit_root,
-    })
-}
-
-fn updater_directory() -> Result<PathBuf> {
-    let executable = std::env::current_exe().context("cannot determine the updater path")?;
-    executable.parent().map(Path::to_path_buf).ok_or_else(|| {
-        anyhow::anyhow!(
-            "updater path {} has no parent directory",
-            executable.display()
-        )
-    })
-}
-
-fn resolve_include(manifest: &Path, directory: &Path, include: &str) -> Result<PathBuf> {
-    let relative = Path::new(include);
-    if !is_portable_relative_path(relative, true) {
-        return Err(UpdaterError::config(
-            manifest,
-            format!("include path {include:?} must stay inside the manifest directory"),
-        )
-        .into());
-    }
-    Ok(directory.join(relative))
-}
-
-fn profile_name(path: &Path) -> Result<String> {
-    if path.extension().and_then(|value| value.to_str()) != Some("yaml") {
-        return Err(
-            UpdaterError::config(path, "profile include must use the .yaml extension").into(),
-        );
-    }
-    if path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .is_some_and(|value| value.eq_ignore_ascii_case("manifest.yaml"))
-    {
-        return Err(
-            UpdaterError::config(path, "manifest.yaml cannot be included as a profile").into(),
-        );
-    }
-    path.file_stem()
-        .and_then(|value| value.to_str())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| UpdaterError::config(path, "invalid profile filename").into())
-}
-
-fn materialize_tool(
-    path: &Path,
-    id: String,
-    profile: String,
-    raw: ToolConfig,
-    defaults: &DefaultsConfig,
-    paths: &Paths,
-) -> Result<Tool> {
-    let install = resolve_install(path, &id, &raw.install, defaults, paths)?;
-    let name = raw.name.unwrap_or_else(|| id.clone());
-    validate_install_spec(path, &id, &name, &raw.artifacts, &install)?;
-    Ok(Tool {
-        name,
-        id,
-        profile,
-        enabled: raw.enabled,
-        release: raw.release,
-        artifacts: raw.artifacts,
-        install,
-        hooks: raw.hooks,
-    })
-}
-
-fn validate_runtime_path_conflicts(path: &Path, tool: &Tool, paths: &Paths) -> Result<()> {
-    let destination = &tool.install.destination;
-    if destination == &paths.toolkit_root {
-        return Err(UpdaterError::config(
-            path,
-            format!(
-                "tool {}: destination must not equal paths.toolkit_root",
-                tool.id
-            ),
-        )
-        .into());
-    }
-    for (field, reserved) in [
-        ("paths.downloads", &paths.downloads),
-        ("paths.staging", &paths.staging),
-        ("paths.state", &paths.state),
-    ] {
-        if paths_overlap(destination, reserved) {
-            return Err(UpdaterError::config(
-                path,
-                format!(
-                    "tool {}: destination {} conflicts with {field} {}",
-                    tool.id,
-                    destination.display(),
-                    reserved.display()
-                ),
-            )
-            .into());
-        }
-    }
-    for link in &tool.install.symlinks {
-        for (field, reserved) in [
-            ("paths.downloads", &paths.downloads),
-            ("paths.staging", &paths.staging),
-            ("paths.state", &paths.state),
-        ] {
-            if paths_overlap(&link.to, reserved) {
-                return Err(UpdaterError::config(
-                    path,
-                    format!(
-                        "tool {}: symlink target {} conflicts with {field} {}",
-                        tool.id,
-                        link.to.display(),
-                        reserved.display()
-                    ),
-                )
-                .into());
-            }
-        }
-    }
-    Ok(())
-}
-
-fn paths_overlap(left: &Path, right: &Path) -> bool {
-    left.starts_with(right) || right.starts_with(left)
-}
-
-fn resolve_install(
-    path: &Path,
-    id: &str,
-    raw: &InstallConfig,
-    defaults: &DefaultsConfig,
-    paths: &Paths,
-) -> Result<InstallSpec> {
-    let input = raw.input.unwrap_or(defaults.install.input);
-    let destination = resolve_destination(&paths.toolkit_root, &raw.destination)
-        .map_err(|message| UpdaterError::config(path, format!("tool {id}: {message}")))?;
-    let destination = destination_for_input(destination, input)
-        .map_err(|message| UpdaterError::config(path, format!("tool {id}: {message}")))?;
-    let symlinks = raw
-        .symlinks
-        .iter()
-        .map(|link| {
-            Ok(SymlinkSpec {
-                from: link.from.clone(),
-                to: resolve_destination(&paths.toolkit_root, &link.to).map_err(|message| {
-                    UpdaterError::config(path, format!("tool {id}: symlink: {message}"))
-                })?,
-            })
-        })
-        .collect::<Result<Vec<_>, UpdaterError>>()?;
-    Ok(InstallSpec {
-        destination,
-        input,
-        existing: raw.existing.unwrap_or(defaults.install.existing),
-        save: raw.save.unwrap_or(defaults.install.save),
-        strip_single_root: raw
-            .strip_single_root
-            .unwrap_or(defaults.install.strip_single_root),
-        create_destination: raw
-            .create_destination
-            .unwrap_or(defaults.create_destination),
-        archive_name: raw
-            .archive_name
-            .clone()
-            .unwrap_or_else(|| defaults.install.archive_name.clone()),
-        archive_password: raw.archive_password.clone(),
-        executable: raw.executable.clone(),
-        symlinks,
-    })
-}
-
-fn destination_for_input(
-    mut destination: PathBuf,
-    input: InputMode,
-) -> std::result::Result<PathBuf, String> {
-    if input != InputMode::Copy {
-        return Ok(destination);
-    }
-    if destination
-        .file_name()
-        .and_then(|value| value.to_str())
-        .is_some_and(|value| value.eq_ignore_ascii_case("release"))
-    {
-        return Err(
-            "destination must not end with 'release' when input is copy; the updater appends it automatically"
-                .to_owned(),
-        );
-    }
-    destination.push("release");
-    Ok(destination)
-}
-
 fn read_yaml<T>(path: &Path) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
@@ -369,39 +75,4 @@ where
         .with_context(|| format!("cannot read configuration {}", path.display()))?;
     yaml_serde::from_str(&input)
         .map_err(|error| UpdaterError::config(path, format!("invalid YAML: {error}")).into())
-}
-
-fn resolve_setting_path(base: &Path, raw: &Path) -> Result<PathBuf> {
-    let expanded = expand_path(raw)?;
-    if expanded.is_absolute() {
-        Ok(expanded)
-    } else {
-        Ok(base.join(expanded))
-    }
-}
-
-fn resolve_destination(root: &Path, raw: &Path) -> std::result::Result<PathBuf, String> {
-    if raw.as_os_str().is_empty() {
-        return Err("destination must not be empty".to_owned());
-    }
-    let expanded = expand_path(raw).map_err(|error| error.to_string())?;
-    if expanded
-        .components()
-        .any(|part| matches!(part, Component::ParentDir))
-    {
-        return Err(format!(
-            "relative destination {} may not contain '..'",
-            raw.display()
-        ));
-    }
-    if expanded.is_absolute() {
-        return Ok(expanded);
-    }
-    if !is_portable_relative_path(&expanded, false) {
-        return Err(format!(
-            "relative destination {} must be a portable, safe relative path",
-            raw.display()
-        ));
-    }
-    Ok(root.join(expanded))
 }

@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+pub(crate) const VERSION_FILE: &str = ".version";
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct NetworkConfig {
@@ -224,6 +226,24 @@ pub struct Tool {
     pub artifacts: Vec<ArtifactConfig>,
     pub install: InstallSpec,
     pub hooks: HookConfig,
+}
+
+impl Tool {
+    pub(crate) fn version_marker_path(&self) -> Option<PathBuf> {
+        (effective_output_mode(self.install.input, self.install.save, &self.artifacts)
+            == OutputMode::Directory)
+            .then(|| {
+                if self.install.input == InputMode::Copy {
+                    self.install
+                        .destination
+                        .parent()
+                        .expect("an installation destination always has a parent")
+                        .join(VERSION_FILE)
+                } else {
+                    self.install.destination.join(VERSION_FILE)
+                }
+            })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

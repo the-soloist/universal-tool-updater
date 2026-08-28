@@ -3,6 +3,7 @@ use std::ffi::OsString;
 use std::io::{ErrorKind, Read};
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -131,51 +132,72 @@ enum WaitOutcome {
     TimedOut,
 }
 
-struct CapturedPipe {
+struct PipeCapture {
+    output: Arc<Mutex<CapturedOutput>>,
+    finished: mpsc::Receiver<std::io::Result<()>>,
+}
+
+#[derive(Clone, Default)]
+struct CapturedOutput {
     bytes: Vec<u8>,
     truncated: bool,
 }
 
 const MAX_CAPTURED_OUTPUT: usize = 64 * 1024;
+const PIPE_DRAIN_GRACE: Duration = Duration::from_millis(250);
 
-fn capture_pipe(
-    mut pipe: impl Read + Send + 'static,
-) -> thread::JoinHandle<std::io::Result<CapturedPipe>> {
-    thread::spawn(move || {
-        let mut captured = Vec::new();
-        let mut truncated = false;
-        let mut buffer = [0_u8; 8192];
-        loop {
-            let read = pipe.read(&mut buffer)?;
-            if read == 0 {
-                break;
+fn capture_pipe(mut pipe: impl Read + Send + 'static) -> PipeCapture {
+    let output = Arc::new(Mutex::new(CapturedOutput::default()));
+    let thread_output = Arc::clone(&output);
+    let (sender, finished) = mpsc::channel();
+    drop(thread::spawn(move || {
+        let result = (|| {
+            let mut buffer = [0_u8; 8192];
+            loop {
+                let read = pipe.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                let mut captured = thread_output
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let remaining = MAX_CAPTURED_OUTPUT.saturating_sub(captured.bytes.len());
+                let retained = remaining.min(read);
+                captured.bytes.extend_from_slice(&buffer[..retained]);
+                captured.truncated |= retained < read;
             }
-            let remaining = MAX_CAPTURED_OUTPUT.saturating_sub(captured.len());
-            let retained = remaining.min(read);
-            captured.extend_from_slice(&buffer[..retained]);
-            truncated |= retained < read;
-        }
-        Ok(CapturedPipe {
-            bytes: captured,
-            truncated,
-        })
-    })
+            Ok(())
+        })();
+        let _ = sender.send(result);
+    }));
+    PipeCapture { output, finished }
 }
 
-fn collect_pipe(
-    handle: Option<thread::JoinHandle<std::io::Result<CapturedPipe>>>,
-    stream: &str,
-) -> Result<String> {
-    let Some(handle) = handle else {
+fn collect_pipe(capture: Option<PipeCapture>, stream: &str) -> Result<String> {
+    let Some(capture) = capture else {
         return Ok(String::new());
     };
-    let captured = handle
-        .join()
-        .map_err(|_| anyhow::anyhow!("Python {stream} reader panicked"))?
-        .with_context(|| format!("cannot read Python {stream}"))?;
+    let complete = match capture.finished.recv_timeout(PIPE_DRAIN_GRACE) {
+        Ok(result) => {
+            result.with_context(|| format!("cannot read Python {stream}"))?;
+            true
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => false,
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            bail!("Python {stream} reader stopped unexpectedly")
+        }
+    };
+    let captured = capture
+        .output
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Python {stream} capture state is poisoned"))?
+        .clone();
     let mut output = String::from_utf8_lossy(&captured.bytes).into_owned();
     if captured.truncated {
         output.push_str("\n[output truncated]");
+    }
+    if !complete {
+        output.push_str("\n[output capture still open after script exit]");
     }
     Ok(output)
 }
@@ -264,6 +286,7 @@ fn working_directory_path<'a>(
 mod tests {
     use std::path::Path;
     use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
 
     use super::wait_for_script;
 
@@ -280,5 +303,34 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("hook-out"));
         assert!(message.contains("hook-error"));
+    }
+
+    #[test]
+    fn terminates_scripts_that_exceed_the_timeout() {
+        let child = Command::new("sh")
+            .args(["-c", "while :; do :; done"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let error = wait_for_script(child, Path::new("slow-hook.py"), 0).unwrap_err();
+
+        assert!(error.to_string().contains("timed out after 0 seconds"));
+    }
+
+    #[test]
+    fn does_not_wait_for_a_descendant_that_keeps_output_open() {
+        let child = Command::new("sh")
+            .args(["-c", "(sleep 2) & printf done"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+
+        wait_for_script(child, Path::new("background-hook.py"), 5).unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }

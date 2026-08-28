@@ -7,9 +7,9 @@ use url::Url;
 
 use crate::domain::{ArtifactConfig, ResolvedArtifact, ResolvedRelease, Tool};
 use crate::error::UpdaterError;
-use crate::paths::safe_filename;
+use crate::paths::{filename_from_url, safe_filename};
 
-use super::util::{filename_from_url, get_text, incompatible_artifact};
+use super::util::{get_text, incompatible_artifact};
 
 pub(super) fn resolve(
     client: &Client,
