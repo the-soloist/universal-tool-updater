@@ -16,11 +16,13 @@ bzip2 = "0.5"
 chardetng = "0.1"
 clap = { version = "4.5", features = ["derive"] }
 console = "0.16"
+crc-fast = "1.10"
 encoding_rs = "0.8"
 flate2 = "1"
 indicatif = "0.18"
+lzma-rs = { version = "0.3", features = ["raw_decoder"] }
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "brotli", "deflate", "gzip", "json", "rustls-tls", "zstd"] }
 semver = "1"
 sevenz-rust = { package = "sevenz-rust2", version = "0.22" }
 serde = { version = "1", features = ["derive"] }
@@ -38,7 +40,7 @@ url = "2"
 walkdir = "2"
 xz2 = "0.1"
 yaml_serde = "0.10"
-zip = { version = "2", default-features = false, features = ["bzip2", "deflate", "deflate64", "zstd"] }
+zip = { version = "2", default-features = false, features = ["bzip2", "deflate", "deflate64", "lzma", "zstd"] }
 
 [profile.release]
 codegen-units = 1
@@ -47,6 +49,3 @@ incremental = false
 lto = "thin"
 panic = "abort"
 strip = "symbols"
-
-[dev-dependencies]
-crc-fast = "1.10"

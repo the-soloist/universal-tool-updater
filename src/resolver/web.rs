@@ -69,10 +69,11 @@ pub(super) fn resolve(
                         message: format!("download link regex produced no capture: {pattern:?}"),
                     })?
                     .as_str();
+                let value = normalize_page_link(value);
                 if let Some(base) = base_url {
                     format!("{base}{value}")
                 } else {
-                    page.join(value)
+                    page.join(&value)
                         .map_err(|error| UpdaterError::Resolution {
                             tool: tool.id.clone(),
                             message: format!("invalid relative download URL {value:?}: {error}"),
@@ -95,10 +96,34 @@ pub(super) fn resolve(
                 return Err(incompatible_artifact(tool, "release-url").into());
             }
         };
+        let filename = if matches!(artifact, ArtifactConfig::PageLink { .. }) {
+            None
+        } else {
+            filename_from_url(&resolved_url)
+        };
         artifacts.push(ResolvedArtifact {
-            filename: filename_from_url(&resolved_url),
+            filename,
             url: resolved_url,
         });
     }
     Ok(ResolvedRelease { version, artifacts })
+}
+
+fn normalize_page_link(value: &str) -> String {
+    value.replace("\\/", "/").replace("&amp;", "&")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_page_link;
+
+    #[test]
+    fn normalizes_json_and_html_escaped_page_links() {
+        assert_eq!(
+            normalize_page_link(
+                r"https:\/\/gobies.org\/download\/release?type=full_url&amp;id=355"
+            ),
+            "https://gobies.org/download/release?type=full_url&id=355"
+        );
+    }
 }

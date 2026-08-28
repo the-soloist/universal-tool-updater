@@ -11,6 +11,8 @@ use crate::paths::{filename_from_url, safe_filename};
 
 use super::util::{get_text, incompatible_artifact};
 
+type HtmlAssets = Vec<(String, String)>;
+
 pub(super) fn resolve(
     client: &Client,
     token: Option<&str>,
@@ -18,13 +20,14 @@ pub(super) fn resolve(
     repository: &str,
     ignored: &[String],
 ) -> Result<ResolvedRelease> {
-    let (version, api_assets) = if let Some(token) = token {
-        release_from_api(client, token, tool, repository, ignored)?
+    let (version, api_assets, mut html_assets) = if let Some(token) = token {
+        let (version, assets) = release_from_api(client, token, tool, repository, ignored)?;
+        (version, assets, None)
     } else {
-        (version_from_atom(client, tool, repository, ignored)?, None)
+        let (version, assets) = version_from_atom(client, tool, repository, ignored)?;
+        (version, None, assets)
     };
 
-    let mut html_assets = None;
     let mut artifacts = Vec::new();
     for artifact in &tool.artifacts {
         match artifact {
@@ -113,7 +116,7 @@ fn matching_github_assets(
     repository: &str,
     version: &str,
     api_assets: &Option<Vec<GithubAsset>>,
-    html_assets: &mut Option<Vec<(String, String)>>,
+    html_assets: &mut Option<HtmlAssets>,
     regex: &Regex,
 ) -> Result<Vec<ResolvedArtifact>> {
     if let Some(assets) = api_assets {
@@ -174,12 +177,20 @@ fn release_from_api(
             tool: tool.id.clone(),
             message: format!("invalid GitHub API response: {error}"),
         })?;
+    let required = required_asset_patterns(tool)?;
     let release = releases
         .into_iter()
-        .find(|release| !release.draft && !ignored.contains(&release.tag_name))
+        .find(|release| {
+            !release.draft
+                && !ignored.contains(&release.tag_name)
+                && release_assets_match(
+                    &required,
+                    release.assets.iter().map(|asset| asset.name.as_str()),
+                )
+        })
         .ok_or_else(|| UpdaterError::Resolution {
             tool: tool.id.clone(),
-            message: "no eligible GitHub release found".to_owned(),
+            message: "no eligible GitHub release matched the configured assets".to_owned(),
         })?;
     Ok((release.tag_name, Some(release.assets)))
 }
@@ -189,21 +200,48 @@ fn version_from_atom(
     tool: &Tool,
     repository: &str,
     ignored: &[String],
-) -> Result<String> {
+) -> Result<(String, Option<HtmlAssets>)> {
     let url = format!("https://github.com/{repository}/releases.atom");
     let body = get_text(client, tool, &url)?;
     let regex = Regex::new(r#"/releases/tag/([^\"<]+)"#).expect("static regex");
-    regex
+    let versions = regex
         .captures_iter(&body)
         .filter_map(|capture| capture.get(1).map(|value| value.as_str().to_owned()))
-        .find(|version| !ignored.contains(version))
-        .ok_or_else(|| {
-            UpdaterError::Resolution {
-                tool: tool.id.clone(),
-                message: "no eligible version found in GitHub release feed".to_owned(),
+        .filter(|version| !ignored.contains(version));
+    let required = required_asset_patterns(tool)?;
+    for version in versions {
+        if required.is_empty() {
+            return Ok((version, None));
+        }
+        let assets = assets_from_html(client, tool, repository, &version)?;
+        if release_assets_match(&required, assets.iter().map(|(name, _)| name.as_str())) {
+            return Ok((version, Some(assets)));
+        }
+    }
+    Err(UpdaterError::Resolution {
+        tool: tool.id.clone(),
+        message: "no eligible GitHub release matched the configured assets".to_owned(),
+    }
+    .into())
+}
+
+fn required_asset_patterns(tool: &Tool) -> Result<Vec<Regex>> {
+    tool.artifacts
+        .iter()
+        .filter_map(|artifact| match artifact {
+            ArtifactConfig::GithubAsset { pattern } | ArtifactConfig::GithubAssets { pattern } => {
+                Some(asset_regex(tool, pattern))
             }
-            .into()
+            _ => None,
         })
+        .collect()
+}
+
+fn release_assets_match<'a>(required: &[Regex], names: impl IntoIterator<Item = &'a str>) -> bool {
+    let names = names.into_iter().collect::<Vec<_>>();
+    required
+        .iter()
+        .all(|pattern| names.iter().any(|name| pattern.is_match(name)))
 }
 
 fn assets_from_html(
@@ -211,7 +249,7 @@ fn assets_from_html(
     tool: &Tool,
     repository: &str,
     version: &str,
-) -> Result<Vec<(String, String)>> {
+) -> Result<HtmlAssets> {
     let url = format!("https://github.com/{repository}/releases/expanded_assets/{version}");
     let body = get_text(client, tool, &url)?;
     let href = Regex::new(r#"href="([^"]+)""#).expect("static regex");
@@ -253,7 +291,7 @@ struct GithubAsset {
 mod tests {
     use regex::Regex;
 
-    use super::matching_artifacts;
+    use super::{matching_artifacts, release_assets_match};
 
     #[test]
     fn collects_every_asset_matching_a_plural_pattern() {
@@ -279,5 +317,18 @@ mod tests {
             artifacts[1].filename.as_deref(),
             Some("frida-server-1-linux-x86_64.xz")
         );
+    }
+
+    #[test]
+    fn requires_every_configured_asset_pattern_to_match_the_same_release() {
+        let required = [
+            Regex::new(r"windows.*\.zip$").unwrap(),
+            Regex::new(r"linux.*\.tar\.gz$").unwrap(),
+        ];
+        assert!(release_assets_match(
+            &required,
+            ["windows-x64.zip", "linux-x64.tar.gz"]
+        ));
+        assert!(!release_assets_match(&required, ["windows-x64.zip"]));
     }
 }

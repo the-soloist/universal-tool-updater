@@ -176,6 +176,7 @@ impl Downloader {
                 .as_deref()
                 .and_then(safe_filename)
                 .or_else(|| filename_from_disposition(&response))
+                .or_else(|| filename_from_url(response.url().as_str()))
                 .or_else(|| {
                     metadata
                         .as_ref()
