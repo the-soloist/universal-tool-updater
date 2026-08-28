@@ -136,6 +136,8 @@ updater --profiles ./profiles --log-dir ~/Logs/universal-tool-updater update fri
 
 ## 配置结构
 
+完整字段、约束、类型兼容关系和示例见 [YAML 配置文件编写规范](docs/YAML_CONFIGURATION.md)。
+
 profiles 目录中的 `manifest.yaml` 负责公共路径、网络参数、默认安装策略和 include 列表。只有 include 中声明的 YAML 会被加载；每个 include 文件就是一个 profile，profile 名称取文件名去掉 `.yaml` 后的部分。例如 `web.yaml` 中的工具属于 `web` profile：
 
 ```yaml
