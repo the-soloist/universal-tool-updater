@@ -1,0 +1,107 @@
+# Profile 文件示例。
+#
+# 使用方式：
+#   1. 将本文件复制到 profiles/<profile-name>.yaml。
+#   2. 在 profiles/manifest.yaml 的 include 中加入该文件名。
+#   3. 修改工具 ID、下载规则和安装目录，并把 enabled 改为 true。
+#
+# 工具 ID 必须使用小写 kebab-case。示例工具默认禁用，避免误下载。
+tools:
+  # GitHub Release：匹配一个压缩资产，解压并保存为目录。
+  example-github-directory:
+    name: ExampleGitHubDirectory
+    enabled: false
+    release:
+      type: github
+      repository: sharkdp/bat
+      ignore_versions:
+        - v0.24.0
+    artifacts:
+      - type: github-asset
+        pattern: '^bat-v[^/]+-x86_64-pc-windows-msvc\.zip$'
+    install:
+      destination: Examples/GitHub/Directory
+      input: extract
+      existing: replace
+      save: directory
+      strip_single_root: true
+      create_destination: true
+      executable:
+        - bat.exe
+      symlinks:
+        - from: bat.exe
+          to: bin/example-bat.exe
+
+  # GitHub Release：匹配全部资产并保留原始文件。
+  # input: copy 会自动把文件保存到 <destination>/release，版本写入
+  # <destination>/.version；destination 不要手动添加 release。
+  example-github-assets:
+    name: ExampleGitHubAssets
+    enabled: false
+    release:
+      type: github
+      repository: frida/frida
+    artifacts:
+      - type: github-assets
+        pattern: '^frida-server-.+-windows-x86_64\.xz$'
+    install:
+      destination: Examples/GitHub/Assets
+      input: copy
+      existing: replace
+      save: directory
+
+  # Web 页面：使用正则解析版本和下载链接，处理后保存为 7z。
+  # 展示名含作者时推荐使用 <工具名>@<作者名>。
+  example-web-archive:
+    name: ExampleWebTool@example-author
+    enabled: false
+    release:
+      type: web
+      url: https://example.com/downloads/
+      version_pattern: 'Latest version:\s*([0-9]+\.[0-9]+\.[0-9]+)'
+      ignore_versions:
+        - 1.0.0-beta
+    artifacts:
+      - type: page-link
+        pattern: 'href="([^"]*example-tool-windows-x64\.zip)"'
+    install:
+      destination: Examples/Web/Archive
+      input: extract
+      existing: merge
+      save: archive
+      strip_single_root: true
+      archive_name: '{name}#{version}.7z'
+    hooks:
+      after_unpack:
+        - type: rename
+          from: example-tool-*.exe
+          to: example-tool.exe
+
+      # 必须使用外部逻辑时只允许 Python 3；启用前确保脚本真实存在。
+      # before_update:
+      #   - type: python
+      #     script: scripts/custom/prepare.py
+      #     args: [--strict]
+      #     timeout_seconds: 60
+      #     working_directory: toolkit
+      #     environment:
+      #       MODE: portable
+
+  # HTTP 固定文件：使用响应头生成版本，并保留 release URL 的原始文件。
+  example-http-file:
+    name: ExampleHTTPFile
+    enabled: false
+    release:
+      type: http
+      url: https://example.com/releases/example-runtime-latest.zip
+      version_headers:
+        - etag
+        - last-modified
+        - content-length
+    artifacts:
+      - type: release-url
+    install:
+      destination: Examples/HTTP/File
+      input: copy
+      existing: replace
+      save: directory

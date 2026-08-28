@@ -482,6 +482,8 @@ hooks:
 
 ## 9. 完整示例
 
+可以直接复制并修改的完整 profile 文件见 [`examples/profile.yaml`](../examples/profile.yaml)。该文件不会被默认 `manifest.yaml` 加载，其中的示例工具也全部设置为 `enabled: false`。
+
 ### 9.1 GitHub 单资产，解压为目录
 
 ```yaml

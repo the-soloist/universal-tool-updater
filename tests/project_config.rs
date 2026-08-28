@@ -1,6 +1,9 @@
+use std::fs;
 use std::path::Path;
 
+use tempfile::tempdir;
 use universal_tool_updater::config;
+
 #[test]
 fn local_profile_manifest_is_valid_when_present() {
     let manifest = Path::new("profiles/manifest.yaml");
@@ -30,4 +33,36 @@ fn local_profile_manifest_is_valid_when_present() {
             tool.id
         );
     }
+}
+
+#[test]
+fn example_profile_remains_valid_and_disabled() {
+    let source = Path::new("examples/profile.yaml");
+    assert!(source.is_file(), "example profile is missing");
+
+    let directory = tempdir().unwrap();
+    fs::copy(source, directory.path().join("example.yaml")).unwrap();
+    fs::write(
+        directory.path().join("manifest.yaml"),
+        r#"
+schema_version: 5
+include: [example.yaml]
+paths:
+  toolkit_root: ExampleToolkit
+  downloads: example-updates
+  state: .updater/example-state.yaml
+defaults:
+  install:
+    input: extract
+    existing: replace
+    save: directory
+    strip_single_root: true
+    archive_name: '{name}#{version}.7z'
+"#,
+    )
+    .unwrap();
+
+    let loaded = config::load(&directory.path().join("manifest.yaml")).unwrap();
+    assert_eq!(loaded.tools.len(), 4);
+    assert!(loaded.tools.values().all(|tool| !tool.enabled));
 }
