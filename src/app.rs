@@ -9,14 +9,22 @@ use anyhow::Result;
 
 use crate::cli::{Cli, Command};
 use crate::config;
-use crate::self_update::{self, SelfUpdateOptions};
+use crate::self_update::{self, SelfUpdateOptions, SelfUpdateOutcome};
 
 use report::list_tools;
 use selection::validate_profiles;
 use show::show_distribution;
 use update::{UpdateOptions, update_tools};
 
-pub fn run(mut cli: Cli) -> Result<()> {
+pub const SELF_UPDATE_SCHEDULED_EXIT_CODE: u8 = 10;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunOutcome {
+    Completed,
+    SelfUpdateScheduled,
+}
+
+pub fn run(mut cli: Cli) -> Result<RunOutcome> {
     let command = cli.command.take().unwrap_or(Command::Update {
         tools: Vec::new(),
         force: false,
@@ -27,12 +35,22 @@ pub fn run(mut cli: Cli) -> Result<()> {
     });
     match &command {
         Command::Migrate { input, output } => {
-            return config::migrate::migrate_directory(input, output);
+            config::migrate::migrate_directory(input, output)?;
+            return Ok(RunOutcome::Completed);
         }
-        Command::SelfUpdate { check, force } => {
-            return self_update::run(SelfUpdateOptions {
+        Command::SelfUpdate {
+            check,
+            force,
+            status,
+        } => {
+            let outcome = self_update::run(SelfUpdateOptions {
                 check_only: *check,
                 force: *force,
+                status_only: *status,
+            })?;
+            return Ok(match outcome {
+                SelfUpdateOutcome::Completed => RunOutcome::Completed,
+                SelfUpdateOutcome::Scheduled => RunOutcome::SelfUpdateScheduled,
             });
         }
         #[cfg(windows)]
@@ -40,9 +58,15 @@ pub fn run(mut cli: Cli) -> Result<()> {
             target,
             candidate,
             version,
-        } => return self_update::replace_helper(target, candidate, version),
+        } => {
+            self_update::replace_helper(target, candidate, version)?;
+            return Ok(RunOutcome::Completed);
+        }
         #[cfg(windows)]
-        Command::SelfCleanup { work_dir } => return self_update::cleanup_helper(work_dir),
+        Command::SelfCleanup { work_dir } => {
+            self_update::cleanup_helper(work_dir)?;
+            return Ok(RunOutcome::Completed);
+        }
         _ => {}
     }
 
@@ -103,5 +127,6 @@ pub fn run(mut cli: Cli) -> Result<()> {
         Command::SelfReplace { .. } | Command::SelfCleanup { .. } => {
             unreachable!("handled before loading configuration")
         }
-    }
+    }?;
+    Ok(RunOutcome::Completed)
 }

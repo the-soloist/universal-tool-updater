@@ -2,9 +2,6 @@ use std::fs;
 use std::path::Path;
 
 #[cfg(windows)]
-use std::path::PathBuf;
-
-#[cfg(windows)]
 use anyhow::bail;
 use anyhow::{Context, Result};
 use semver::Version;
@@ -12,7 +9,10 @@ use tempfile::TempDir;
 
 use super::UpdateLock;
 #[cfg(windows)]
-use super::{LOCK_FILENAME, WORK_DIRECTORY_PREFIX};
+use super::WORK_DIRECTORY_PREFIX;
+
+#[cfg(windows)]
+const HELPER_READY_FILENAME: &str = "helper.ready";
 
 pub(super) enum InstallOutcome {
     Completed,
@@ -20,7 +20,7 @@ pub(super) enum InstallOutcome {
     Scheduled,
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(windows)))]
 pub(super) fn install(
     target: &Path,
     candidate: &Path,
@@ -40,7 +40,7 @@ pub(super) fn install(
     Ok(InstallOutcome::Completed)
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(windows)))]
 fn replace_unix(target: &Path, candidate: &Path) -> Result<()> {
     fs::rename(candidate, target).with_context(|| {
         format!(
@@ -61,6 +61,10 @@ pub(super) fn install(
 ) -> Result<InstallOutcome> {
     use std::process::{Command, Stdio};
 
+    let target_parent = target
+        .parent()
+        .context("current updater has no parent directory")?;
+    let version = version.to_string();
     let helper = work_dir.path().join("updater-self-replace.exe");
     fs::copy(target, &helper).with_context(|| {
         format!(
@@ -76,14 +80,37 @@ pub(super) fn install(
         .arg("--candidate")
         .arg(candidate)
         .arg("--version")
-        .arg(version.to_string())
+        .arg(&version)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn();
     match spawn {
-        Ok(_) => {
-            lock.handoff();
+        Ok(mut child) => {
+            if let Err(error) = wait_for_helper_ready(&mut child, &work_path) {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = fs::remove_dir_all(&work_path);
+                return Err(error);
+            }
+            if let Err(error) = super::status::write_scheduled(target_parent, &version) {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = fs::remove_dir_all(&work_path);
+                return Err(error);
+            }
+            if let Err(error) = lock.release_for_handoff() {
+                if let Err(status_error) =
+                    super::status::write_failure(target_parent, &version, format!("{error:#}"))
+                {
+                    tracing::error!(error = %status_error, "cannot persist failed self-update result");
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = fs::remove_dir_all(&work_path);
+                return Err(error);
+            }
+            drop(child);
             Ok(InstallOutcome::Scheduled)
         }
         Err(error) => {
@@ -99,29 +126,69 @@ pub(super) fn install(
 }
 
 #[cfg(windows)]
+fn wait_for_helper_ready(child: &mut std::process::Child, work_dir: &Path) -> Result<()> {
+    use std::thread;
+    use std::time::Duration;
+
+    let ready = work_dir.join(HELPER_READY_FILENAME);
+    for _ in 0..100 {
+        if ready.is_file() {
+            return Ok(());
+        }
+        if let Some(status) = child
+            .try_wait()
+            .context("cannot inspect Windows self-update helper status")?
+        {
+            bail!("Windows self-update helper exited before lock handoff with status {status}");
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    bail!("timed out waiting for the Windows self-update helper to initialize")
+}
+
+#[cfg(windows)]
 pub(super) fn replace_helper(target: &Path, candidate: &Path, version: &str) -> Result<()> {
     let helper = std::env::current_exe().context("cannot determine self-update helper path")?;
     let work_dir = helper
         .parent()
         .context("self-update helper has no parent directory")?;
     validate_helper_layout(&helper, work_dir, target, candidate)?;
-    let lock_path = target
-        .parent()
-        .expect("validated target has a parent")
-        .join(LOCK_FILENAME);
-    let mut lock_cleanup = LockCleanup::new(lock_path);
+    let ready = work_dir.join(HELPER_READY_FILENAME);
+    fs::write(&ready, b"ready").with_context(|| {
+        format!(
+            "cannot signal Windows self-update helper readiness at {}",
+            ready.display()
+        )
+    })?;
+    let target_parent = target.parent().expect("validated target has a parent");
+    let _lock = UpdateLock::acquire_for_helper(target_parent)?;
+    let _ = fs::remove_file(&ready);
     let backup = work_dir.join("updater.previous.exe");
     if let Err(error) = wait_and_replace_windows(target, candidate, &backup) {
+        if let Err(status_error) =
+            super::status::write_failure(target_parent, version, format!("{error:#}"))
+        {
+            tracing::error!(error = %status_error, "cannot persist failed self-update result");
+        }
         if let Ok(cleanup) = spawn_cleanup(target, work_dir) {
             drop(cleanup);
-            lock_cleanup.handoff();
         }
         return Err(error);
     }
 
-    let cleanup = spawn_cleanup(target, work_dir)?;
+    let cleanup = match spawn_cleanup(target, work_dir) {
+        Ok(cleanup) => cleanup,
+        Err(error) => {
+            if let Err(status_error) =
+                super::status::write_failure(target_parent, version, format!("{error:#}"))
+            {
+                tracing::error!(error = %status_error, "cannot persist failed self-update result");
+            }
+            return Err(error);
+        }
+    };
     drop(cleanup);
-    lock_cleanup.handoff();
+    super::status::write_success(target_parent, version)?;
     println!("updater updated successfully to v{version}");
     Ok(())
 }
@@ -153,31 +220,17 @@ pub(super) fn cleanup_helper(work_dir: &Path) -> Result<()> {
     use std::time::Duration;
 
     validate_cleanup_directory(work_dir)?;
-    let target_parent = std::env::current_exe()
-        .context("cannot determine updated updater path")?
-        .parent()
-        .context("updated updater has no parent directory")?
-        .to_path_buf();
-    let lock_path = target_parent.join(LOCK_FILENAME);
-
     let mut last_error = None;
     for _ in 0..150 {
         match fs::remove_dir_all(work_dir) {
-            Ok(()) => {
-                remove_lock(&lock_path);
-                return Ok(());
-            }
-            Err(error) if error.kind() == ErrorKind::NotFound => {
-                remove_lock(&lock_path);
-                return Ok(());
-            }
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
             Err(error) => {
                 last_error = Some(error);
                 thread::sleep(Duration::from_millis(100));
             }
         }
     }
-    remove_lock(&lock_path);
     let error = last_error.expect("cleanup retry loop records every failure");
     Err(error).with_context(|| {
         format!(
@@ -274,7 +327,6 @@ fn validate_cleanup_directory(work_dir: &Path) -> Result<()> {
 
 #[cfg(windows)]
 fn wait_and_replace_windows(target: &Path, candidate: &Path, backup: &Path) -> Result<()> {
-    use std::io::ErrorKind;
     use std::thread;
     use std::time::Duration;
 
@@ -302,12 +354,7 @@ fn wait_and_replace_windows(target: &Path, candidate: &Path, backup: &Path) -> R
                     }
                 };
             }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    ErrorKind::PermissionDenied | ErrorKind::WouldBlock
-                ) =>
-            {
+            Err(error) if is_retryable_windows_replace_error(&error) => {
                 last_error = Some(error);
                 thread::sleep(Duration::from_millis(100));
             }
@@ -331,41 +378,14 @@ fn wait_and_replace_windows(target: &Path, candidate: &Path, backup: &Path) -> R
 }
 
 #[cfg(windows)]
-struct LockCleanup {
-    path: PathBuf,
-    remove_on_drop: bool,
-}
+fn is_retryable_windows_replace_error(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
 
-#[cfg(windows)]
-impl LockCleanup {
-    fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            remove_on_drop: true,
-        }
-    }
-
-    fn handoff(&mut self) {
-        self.remove_on_drop = false;
-    }
-}
-
-#[cfg(windows)]
-impl Drop for LockCleanup {
-    fn drop(&mut self) {
-        if self.remove_on_drop {
-            remove_lock(&self.path);
-        }
-    }
-}
-
-#[cfg(windows)]
-fn remove_lock(path: &Path) {
-    if let Err(error) = fs::remove_file(path)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        tracing::warn!(path = %path.display(), error = %error, "cannot remove self-update lock");
-    }
+    matches!(error.raw_os_error(), Some(32 | 33))
+        || matches!(
+            error.kind(),
+            ErrorKind::PermissionDenied | ErrorKind::WouldBlock
+        )
 }
 
 #[cfg(test)]
@@ -376,12 +396,12 @@ mod tests {
     #[cfg(any(unix, windows))]
     use tempfile::tempdir;
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(windows)))]
     use super::replace_unix;
     #[cfg(windows)]
-    use super::wait_and_replace_windows;
+    use super::{is_retryable_windows_replace_error, wait_and_replace_windows};
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(windows)))]
     #[test]
     fn atomically_replaces_an_existing_unix_binary() {
         let directory = tempdir().unwrap();
@@ -419,5 +439,16 @@ mod tests {
         assert!(wait_and_replace_windows(&target, &missing, &backup).is_err());
         assert_eq!(fs::read_to_string(&target).unwrap(), "old");
         assert!(!backup.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn retries_windows_sharing_and_lock_violations() {
+        assert!(is_retryable_windows_replace_error(
+            &std::io::Error::from_raw_os_error(32)
+        ));
+        assert!(is_retryable_windows_replace_error(
+            &std::io::Error::from_raw_os_error(33)
+        ));
     }
 }

@@ -85,12 +85,16 @@ pub enum Command {
     /// Check for and install a newer updater release.
     SelfUpdate {
         /// Only report whether an update is available.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "status")]
         check: bool,
 
         /// Reinstall the current release when it is already installed.
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with = "status")]
         force: bool,
+
+        /// Report the final result of an asynchronous Windows self-update.
+        #[arg(long)]
+        status: bool,
     },
 
     #[cfg(windows)]
@@ -215,8 +219,23 @@ mod tests {
             cli.command,
             Some(Command::SelfUpdate {
                 check: true,
-                force: false
+                force: false,
+                status: false
             })
         ));
+    }
+
+    #[test]
+    fn parses_self_update_status_as_an_exclusive_mode() {
+        let cli = Cli::try_parse_from(["updater", "self-update", "--status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::SelfUpdate {
+                check: false,
+                force: false,
+                status: true
+            })
+        ));
+        assert!(Cli::try_parse_from(["updater", "self-update", "--status", "--force"]).is_err());
     }
 }

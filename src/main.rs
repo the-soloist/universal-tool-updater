@@ -2,7 +2,10 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use universal_tool_updater::{app, cli::Cli};
+use universal_tool_updater::{
+    app::{self, RunOutcome},
+    cli::Cli,
+};
 
 mod logging;
 
@@ -22,9 +25,16 @@ fn main() -> ExitCode {
     tracing::info!(log = %log_path.display(), command = %arguments, "updater run started");
 
     match app::run(cli) {
-        Ok(()) => {
+        Ok(RunOutcome::Completed) => {
             tracing::info!("updater run completed");
             ExitCode::SUCCESS
+        }
+        Ok(RunOutcome::SelfUpdateScheduled) => {
+            tracing::warn!(
+                exit_code = app::SELF_UPDATE_SCHEDULED_EXIT_CODE,
+                "Windows self-update was scheduled; replacement is not complete yet"
+            );
+            ExitCode::from(app::SELF_UPDATE_SCHEDULED_EXIT_CODE)
         }
         Err(error) => {
             tracing::error!("{error:#}");

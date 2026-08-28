@@ -1,9 +1,10 @@
 mod checksum;
 mod github;
 mod replacement;
+mod status;
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Read, Write};
+use std::fs::{self, File, OpenOptions, TryLockError};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -31,9 +32,19 @@ const WORK_DIRECTORY_PREFIX: &str = ".updater-self-update-";
 pub struct SelfUpdateOptions {
     pub check_only: bool,
     pub force: bool,
+    pub status_only: bool,
 }
 
-pub fn run(options: SelfUpdateOptions) -> Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfUpdateOutcome {
+    Completed,
+    Scheduled,
+}
+
+pub fn run(options: SelfUpdateOptions) -> Result<SelfUpdateOutcome> {
+    if options.status_only {
+        return report_status();
+    }
     let current_version = Version::parse(env!("CARGO_PKG_VERSION"))
         .context("the compiled updater version is not valid semver")?;
     let client = http_client()?;
@@ -45,7 +56,7 @@ pub fn run(options: SelfUpdateOptions) -> Result<()> {
 
     if release.version < current_version {
         println!("The installed updater is newer than the latest stable release.");
-        return Ok(());
+        return Ok(SelfUpdateOutcome::Completed);
     }
     if options.check_only {
         if release.version > current_version {
@@ -53,11 +64,11 @@ pub fn run(options: SelfUpdateOptions) -> Result<()> {
         } else {
             println!("The updater is current.");
         }
-        return Ok(());
+        return Ok(SelfUpdateOutcome::Completed);
     }
     if release.version == current_version && !options.force {
         println!("The updater is already current.");
-        return Ok(());
+        return Ok(SelfUpdateOutcome::Completed);
     }
 
     let target = current_updater()?;
@@ -106,13 +117,52 @@ pub fn run(options: SelfUpdateOptions) -> Result<()> {
     match replacement::install(&target, &candidate, work_dir, &release.version, &mut lock)? {
         InstallOutcome::Completed => {
             println!("updater updated successfully to {}", release.tag);
+            Ok(SelfUpdateOutcome::Completed)
         }
         #[cfg(windows)]
         InstallOutcome::Scheduled => {
             println!("The verified update will be installed after this process exits.");
+            println!("Run `updater self-update --status` to inspect the helper result.");
+            Ok(SelfUpdateOutcome::Scheduled)
         }
     }
-    Ok(())
+}
+
+fn report_status() -> Result<SelfUpdateOutcome> {
+    let target = current_updater()?;
+    let directory = target
+        .parent()
+        .context("the current updater has no parent directory")?;
+    let Some(result) = status::read(directory)? else {
+        bail!(
+            "no asynchronous self-update result exists at {}",
+            directory.join(status::RESULT_FILENAME).display()
+        );
+    };
+    tracing::debug!(
+        version = %result.version,
+        updated_at_unix_ms = result.updated_at_unix_ms,
+        "loaded persisted self-update result"
+    );
+    match result.status {
+        status::StoredStatus::Scheduled => {
+            println!("Self-update to v{} is scheduled.", result.version);
+            if let Some(message) = result.message {
+                println!("{message}");
+            }
+            Ok(SelfUpdateOutcome::Scheduled)
+        }
+        status::StoredStatus::Success => {
+            println!("Self-update to v{} completed successfully.", result.version);
+            Ok(SelfUpdateOutcome::Completed)
+        }
+        status::StoredStatus::Failed => {
+            let message = result
+                .message
+                .unwrap_or_else(|| "the Windows replacement helper failed".to_owned());
+            bail!("self-update to v{} failed: {message}", result.version);
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -381,26 +431,33 @@ fn retryable_status(status: StatusCode) -> bool {
 }
 
 struct UpdateLock {
+    _file: File,
+    #[cfg(any(windows, test))]
     path: PathBuf,
-    remove_on_drop: bool,
 }
 
 impl UpdateLock {
     fn acquire(directory: &Path) -> Result<Self> {
         let path = directory.join(LOCK_FILENAME);
-        let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                bail!(
-                    "another self-update may be running; remove stale lock {} only after confirming no updater is active",
-                    path.display()
-                );
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("cannot open self-update lock {}", path.display()))?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => {
+                bail!("another self-update is already running");
             }
-            Err(error) => {
+            Err(TryLockError::Error(error)) => {
                 return Err(error)
-                    .with_context(|| format!("cannot create self-update lock {}", path.display()));
+                    .with_context(|| format!("cannot lock self-update lock {}", path.display()));
             }
-        };
+        }
+        file.set_len(0)
+            .with_context(|| format!("cannot reset self-update lock {}", path.display()))?;
         if let Err(error) = writeln!(
             file,
             "pid={} version={}",
@@ -409,31 +466,36 @@ impl UpdateLock {
         )
         .and_then(|()| file.sync_all())
         {
-            drop(file);
-            let _ = fs::remove_file(&path);
             return Err(error)
                 .with_context(|| format!("cannot initialize self-update lock {}", path.display()));
         }
         Ok(Self {
+            _file: file,
+            #[cfg(any(windows, test))]
             path,
-            remove_on_drop: true,
         })
     }
 
-    #[cfg(windows)]
-    fn handoff(&mut self) {
-        self.remove_on_drop = false;
+    #[cfg(any(windows, test))]
+    fn acquire_for_helper(directory: &Path) -> Result<Self> {
+        let path = directory.join(LOCK_FILENAME);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("cannot open self-update lock {}", path.display()))?;
+        file.lock()
+            .with_context(|| format!("cannot acquire self-update lock {}", path.display()))?;
+        Ok(Self { _file: file, path })
     }
-}
 
-impl Drop for UpdateLock {
-    fn drop(&mut self) {
-        if self.remove_on_drop
-            && let Err(error) = fs::remove_file(&self.path)
-            && error.kind() != ErrorKind::NotFound
-        {
-            tracing::warn!(path = %self.path.display(), error = %error, "cannot remove self-update lock");
-        }
+    #[cfg(any(windows, test))]
+    fn release_for_handoff(&self) -> Result<()> {
+        self._file
+            .unlock()
+            .with_context(|| format!("cannot hand off self-update lock {}", self.path.display()))
     }
 }
 
@@ -443,7 +505,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{UpdateLock, asset_platform, find_candidate};
+    use super::{LOCK_FILENAME, UpdateLock, asset_platform, find_candidate};
 
     #[test]
     fn maps_only_published_platforms() {
@@ -475,6 +537,16 @@ mod tests {
         let first = UpdateLock::acquire(directory.path()).unwrap();
         assert!(UpdateLock::acquire(directory.path()).is_err());
         drop(first);
+        assert!(directory.path().join(LOCK_FILENAME).exists());
         UpdateLock::acquire(directory.path()).unwrap();
+    }
+
+    #[test]
+    fn hands_the_process_lock_to_the_replacement_helper() {
+        let directory = tempdir().unwrap();
+        let first = UpdateLock::acquire(directory.path()).unwrap();
+        first.release_for_handoff().unwrap();
+        let helper = UpdateLock::acquire_for_helper(directory.path()).unwrap();
+        assert_eq!(helper.path, directory.path().join(LOCK_FILENAME));
     }
 }
