@@ -37,10 +37,10 @@ jobs:
           sudo apt-get install --yes musl-tools
       - name: Lint
         run: cargo clippy --all-targets --all-features -- -D warnings
+      # Runtime profiles live outside this repository; check command coverage uses
+      # self-contained configurations in tests/check_command.rs.
       - name: Test
         run: cargo test --all-targets --all-features
-      - name: Validate platform configuration
-        run: cargo run -- check
       - name: Build release binary
         if: runner.os != 'macOS'
         shell: bash

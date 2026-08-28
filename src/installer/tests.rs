@@ -3,10 +3,12 @@ use std::fs;
 use tempfile::tempdir;
 
 use crate::archive::ArchiveService;
-use crate::config::model::{
-    ArtifactConfig, ExistingPolicy, HookAction, HookConfig, InputMode, OutputMode, ReleaseConfig,
-};
-use crate::domain::{DownloadedArtifact, SymlinkSpec};
+use crate::config::model::{ArtifactConfig, ExistingPolicy, InputMode, OutputMode, ReleaseConfig};
+#[cfg(unix)]
+use crate::config::model::{HookAction, HookConfig};
+use crate::domain::DownloadedArtifact;
+#[cfg(unix)]
+use crate::domain::SymlinkSpec;
 use crate::hooks::HookRunner;
 use crate::progress::ProgressManager;
 use crate::test_support::tool as test_tool;
