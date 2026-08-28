@@ -146,7 +146,9 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{copy_tree, path_exists, remove_path, single_directory_base};
+    use super::{copy_tree, single_directory_base};
+    #[cfg(unix)]
+    use super::{path_exists, remove_path};
 
     #[test]
     fn copies_and_flattens_single_directory_trees() {
