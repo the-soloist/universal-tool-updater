@@ -48,7 +48,7 @@ jobs:
         run: |
           mkdir -p dist
           tar -C target/x86_64-unknown-linux-musl/release \
-            -czf "dist/universal-tool-updater-${GITHUB_REF_NAME}-x86_64-unknown-linux-musl.tar.gz" \
+            -czf "dist/updater-${GITHUB_REF_NAME}-linux.tar.gz" \
             updater
       - uses: actions/upload-artifact@v4
         with:
@@ -72,7 +72,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          $archive = "dist/universal-tool-updater-$env:GITHUB_REF_NAME-x86_64-pc-windows-msvc.zip"
+          $archive = "dist/updater-$env:GITHUB_REF_NAME-windows.zip"
           Compress-Archive -Path target/x86_64-pc-windows-msvc/release/updater.exe -DestinationPath $archive
       - uses: actions/upload-artifact@v4
         with:
@@ -96,7 +96,7 @@ jobs:
         run: |
           mkdir -p dist
           tar -C target/universal-apple-darwin/release \
-            -czf "dist/universal-tool-updater-${GITHUB_REF_NAME}-universal-apple-darwin.tar.gz" \
+            -czf "dist/updater-${GITHUB_REF_NAME}-macos.tar.gz" \
             updater
       - uses: actions/upload-artifact@v4
         with:
@@ -120,7 +120,7 @@ jobs:
         shell: bash
         run: |
           cd dist
-          sha256sum universal-tool-updater-* > SHA256SUMS
+          sha256sum updater-* > SHA256SUMS
       - name: Create or update release
         env:
           GH_TOKEN: ${{ github.token }}

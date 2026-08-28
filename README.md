@@ -64,6 +64,10 @@ macOS Universal 产物位于 `target/universal-apple-darwin/release/updater`。L
 
 推送与 `Cargo.toml` 版本一致的 `v*` 标签后，GitHub Actions 会自动构建 Linux x86_64 musl、Windows x86_64 和 macOS Universal 版本，并创建 GitHub Release、上传压缩包及 `SHA256SUMS`：
 
+- `updater-vX.Y.Z-linux.tar.gz`
+- `updater-vX.Y.Z-windows.zip`
+- `updater-vX.Y.Z-macos.tar.gz`
+
 ```bash
 git tag v0.1.0
 git push origin v0.1.0
