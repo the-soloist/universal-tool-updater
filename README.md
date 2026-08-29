@@ -189,7 +189,7 @@ updates/
     └── run-*/         # 本次更新的事务暂存，结束后清理
 ```
 
-多产物工具会保留每个已完成的下载，直到该工具整体安装成功。运行被中断后，下一次更新会校验并复用这些文件，从第一个尚未完成的产物继续；旧版本遗留在 `run-*/<tool-id>/downloads/` 中的完整文件也会自动恢复，无需手工移动。
+多产物工具会保留每个已完成的下载，直到该工具整体安装成功；安装成功后会立即删除该 tool 的完整下载文件和 partial 缓存。运行被中断或安装失败时会保留缓存，下一次更新会校验并复用这些文件，从第一个尚未完成的产物继续；旧版本遗留在 `run-*/<tool-id>/downloads/` 中的完整文件也会自动恢复，无需手工移动。
 
 每个 `.part` 文件都有一份 schema v2 YAML 元数据，记录 URL、文件名、远端总大小、ETag / Last-Modified、已确认字节数、SHA-256、完成状态和校验级别。下载过程中每 8 MiB 先同步文件，再原子更新 SHA-256 校验点；下次续传前会重新计算已有分片的哈希。哈希不一致的缓存会被删除并从头下载，异常退出后位于最后一个校验点之后的未确认尾部会被截断。`verified: transport` 表示 HTTP 传输完整性已经确认，不代表压缩包内容已经通过解压校验。
 
@@ -324,11 +324,3 @@ git push origin v0.2.0
 ```
 
 GitHub Actions 会构建三个平台的 7z 包、生成 `SHA256SUMS.txt` 并创建 GitHub Release。
-
-## 开发验证
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features
-```

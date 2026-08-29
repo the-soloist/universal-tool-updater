@@ -283,6 +283,7 @@ impl UpdateSession<'_> {
             self.compression_threads,
         )?;
         workspace.clear_partials()?;
+        workspace.clear_downloads()?;
         Ok(result(
             tool,
             UpdateStatus::Updated,

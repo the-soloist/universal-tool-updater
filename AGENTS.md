@@ -81,6 +81,16 @@ xxx(xxx): 中文标题
 
 第一行使用英文类型和作用域，标题使用简洁中文；正文与标题之间保留一个空行，并用中文概括实际修改内容。提交前先通过相关格式检查和测试，再执行提交与推送。
 
+## 6. 本地验证与 CI
+
+本地优先运行：
+
+```bash
+cargo test --all-targets --all-features
+```
+
+`cargo clippy --all-targets --all-features -- -D warnings` 是静态检查，将警告视为错误；`cargo test --all-targets --all-features` 会编译并执行所有目标的测试。格式检查、Clippy 和构建由 CI 统一执行，本地无需重复运行完整 CI 流程。
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.

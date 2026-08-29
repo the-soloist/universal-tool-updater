@@ -199,6 +199,33 @@ impl ToolWorkspace {
         }
         Ok(())
     }
+
+    pub(crate) fn clear_downloads(&self) -> Result<()> {
+        match fs::symlink_metadata(&self.downloads) {
+            Ok(metadata) if metadata.file_type().is_dir() => {
+                fs::remove_dir_all(&self.downloads).with_context(|| {
+                    format!(
+                        "cannot clear completed download directory {}",
+                        self.downloads.display()
+                    )
+                })?;
+            }
+            Ok(_) => anyhow::bail!(
+                "download path {} is not a directory",
+                self.downloads.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "cannot inspect completed download directory {}",
+                        self.downloads.display()
+                    )
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Drop for ToolWorkspace {
@@ -260,5 +287,24 @@ mod tests {
         assert!(!run_path.exists());
         assert!(!staging_run_path.exists());
         assert_eq!(fs::read_to_string(partial_path).unwrap(), "partial");
+    }
+
+    #[test]
+    fn clears_only_the_completed_downloads_for_one_tool() {
+        let root = tempdir().unwrap();
+        let staging = root.path().join("staging");
+        let run = RunWorkspace::create(root.path(), &staging).unwrap();
+        let first = run.prepare(&tool("first", "first")).unwrap();
+        let second = run.prepare(&tool("second", "second")).unwrap();
+        fs::write(first.downloads().join("artifact.zip"), "first").unwrap();
+        fs::write(second.downloads().join("artifact.zip"), "second").unwrap();
+
+        first.clear_downloads().unwrap();
+
+        assert!(!first.downloads().exists());
+        assert_eq!(
+            fs::read_to_string(second.downloads().join("artifact.zip")).unwrap(),
+            "second"
+        );
     }
 }
