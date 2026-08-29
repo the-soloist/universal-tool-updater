@@ -29,20 +29,40 @@ jobs:
           fi
 
   build-linux:
-    name: Build Linux x86_64 musl
+    name: Build Linux ${{ matrix.arch }} musl
     needs: validate-tag
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-unknown-linux-musl
+            platform: linux
+            use_zig: false
+          - arch: arm64
+            target: aarch64-unknown-linux-musl
+            platform: linux-arm64
+            use_zig: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-musl
+          targets: ${{ matrix.target }}
       - name: Install musl linker
+        if: matrix.use_zig == false
         run: |
           sudo apt-get update
           sudo apt-get install --yes musl-tools
+      - name: Install Zig
+        if: matrix.use_zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.14.1
+      - name: Install cargo-zigbuild
+        if: matrix.use_zig
+        run: cargo install cargo-zigbuild --locked
       - name: Build release binary
-        run: ./build.sh --target x86_64-unknown-linux-musl
+        run: ./build.sh --target ${{ matrix.target }}
       - name: Package release asset
         shell: bash
         run: |
@@ -52,29 +72,38 @@ jobs:
             echo "error: 7-Zip is not installed" >&2
             exit 1
           fi
-          archive="${PWD}/dist/updater-${GITHUB_REF_NAME}-linux.7z"
+          archive="${PWD}/dist/updater-${GITHUB_REF_NAME}-${{ matrix.platform }}.7z"
           (
-            cd target/x86_64-unknown-linux-musl/release
+            cd target/${{ matrix.target }}/release
             "${seven_zip}" a -t7z -mx=9 "${archive}" updater
           )
       - uses: actions/upload-artifact@v7
         with:
-          name: linux-x86_64-musl
+          name: ${{ matrix.platform }}
           path: dist/*
           if-no-files-found: error
 
   build-windows:
-    name: Build Windows x86_64
+    name: Build Windows ${{ matrix.arch }}
     needs: validate-tag
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-pc-windows-gnu
+            platform: windows
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+            platform: windows-arm64
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-gnu
+          targets: ${{ matrix.target }}
       - name: Build release binary
         shell: bash
-        run: ./build.sh --target x86_64-pc-windows-gnu
+        run: ./build.sh --target ${{ matrix.target }}
       - name: Package release asset
         shell: pwsh
         run: |
@@ -88,8 +117,8 @@ jobs:
           if (-not (Test-Path $sevenZip)) {
             throw '7-Zip is not installed'
           }
-          $archive = Join-Path $PWD "dist/updater-${env:GITHUB_REF_NAME}-windows.7z"
-          Push-Location target/x86_64-pc-windows-gnu/release
+          $archive = Join-Path $PWD "dist/updater-${env:GITHUB_REF_NAME}-${{ matrix.platform }}.7z"
+          Push-Location target/${{ matrix.target }}/release
           try {
             & $sevenZip a -t7z -mx=9 $archive updater.exe
             if ($LASTEXITCODE -ne 0) {
@@ -100,21 +129,30 @@ jobs:
           }
       - uses: actions/upload-artifact@v7
         with:
-          name: windows-x86_64-gnu
+          name: ${{ matrix.platform }}
           path: dist/*
           if-no-files-found: error
 
   build-macos:
-    name: Build macOS Universal
+    name: Build macOS ${{ matrix.arch }}
     needs: validate-tag
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-apple-darwin
+            platform: macos-arm64
+          - arch: x86_64
+            target: x86_64-apple-darwin
+            platform: macos-x86_64
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
-      - name: Build universal release binary
-        run: ./build.sh --macos-universal
+          targets: ${{ matrix.target }}
+      - name: Build release binary
+        run: ./build.sh --target ${{ matrix.target }}
       - name: Package release asset
         shell: bash
         run: |
@@ -124,14 +162,14 @@ jobs:
             echo "error: 7-Zip is not installed" >&2
             exit 1
           fi
-          archive="${PWD}/dist/updater-${GITHUB_REF_NAME}-macos.7z"
+          archive="${PWD}/dist/updater-${GITHUB_REF_NAME}-${{ matrix.platform }}.7z"
           (
-            cd target/universal-apple-darwin/release
+            cd target/${{ matrix.target }}/release
             "${seven_zip}" a -t7z -mx=9 "${archive}" updater
           )
       - uses: actions/upload-artifact@v7
         with:
-          name: macos-universal
+          name: ${{ matrix.platform }}
           path: dist/*
           if-no-files-found: error
 

@@ -178,8 +178,11 @@ pub fn cleanup_helper(work_dir: &Path) -> Result<()> {
 fn asset_platform(os: &str, arch: &str) -> Result<&'static str> {
     match (os, arch) {
         ("windows", "x86_64") => Ok("windows"),
+        ("windows", "aarch64") => Ok("windows-arm64"),
         ("linux", "x86_64") => Ok("linux"),
-        ("macos", "x86_64" | "aarch64") => Ok("macos"),
+        ("linux", "aarch64") => Ok("linux-arm64"),
+        ("macos", "x86_64") => Ok("macos-x86_64"),
+        ("macos", "aarch64") => Ok("macos-arm64"),
         _ => bail!("self-update is unsupported on {os}/{arch}"),
     }
 }

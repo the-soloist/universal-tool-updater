@@ -9,10 +9,15 @@ use super::lock::{LOCK_FILENAME, UpdateLock};
 #[test]
 fn maps_only_published_platforms() {
     assert_eq!(asset_platform("linux", "x86_64").unwrap(), "linux");
+    assert_eq!(asset_platform("linux", "aarch64").unwrap(), "linux-arm64");
     assert_eq!(asset_platform("windows", "x86_64").unwrap(), "windows");
-    assert_eq!(asset_platform("macos", "aarch64").unwrap(), "macos");
-    assert_eq!(asset_platform("macos", "x86_64").unwrap(), "macos");
-    assert!(asset_platform("linux", "aarch64").is_err());
+    assert_eq!(
+        asset_platform("windows", "aarch64").unwrap(),
+        "windows-arm64"
+    );
+    assert_eq!(asset_platform("macos", "aarch64").unwrap(), "macos-arm64");
+    assert_eq!(asset_platform("macos", "x86_64").unwrap(), "macos-x86_64");
+    assert!(asset_platform("linux", "armv7").is_err());
 }
 
 #[test]

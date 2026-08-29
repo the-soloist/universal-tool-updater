@@ -288,8 +288,11 @@ updater self-update --status
 目前发布目标：
 
 - Linux x86_64 musl
+- Linux ARM64 musl
 - Windows x86_64 GNU
-- macOS Universal（Apple Silicon + Intel）
+- Windows ARM64 MSVC
+- macOS x86_64
+- macOS ARM64
 
 ## 构建
 
@@ -301,17 +304,20 @@ updater self-update --status
 
 # 指定 Rust target
 ./build.sh --target x86_64-unknown-linux-musl
+./build.sh --target aarch64-unknown-linux-musl
 ./build.sh --target x86_64-pc-windows-gnu
+./build.sh --target aarch64-pc-windows-msvc
+./build.sh --target aarch64-apple-darwin
+./build.sh --target x86_64-apple-darwin
 
-# macOS Universal
-rustup target add aarch64-apple-darwin x86_64-apple-darwin
-./build.sh --macos-universal
 ```
 
-Linux 和 Windows GNU 交叉构建需要目标链接器；macOS 上安装 Zig、`cargo-zigbuild` 并执行 `rustup target add x86_64-pc-windows-gnu` 后，脚本会自动使用 Zig 构建 Windows GNU 版本。Windows GNU 产物位于 `target/x86_64-pc-windows-gnu/release/updater.exe`。macOS Universal 产物位于：
+Linux ARM64 musl 交叉构建需要 Zig 和 `cargo-zigbuild`；脚本会自动使用 Zig 构建该目标。Windows ARM64 使用 `aarch64-pc-windows-msvc`，Windows x86_64 使用 `x86_64-pc-windows-gnu`。macOS 两个架构分别构建，不再合并为 Universal 产物。
 
 ```text
-target/universal-apple-darwin/release/updater
+target/aarch64-unknown-linux-musl/release/updater
+target/aarch64-pc-windows-msvc/release/updater.exe
+target/aarch64-apple-darwin/release/updater
 ```
 
 ## 发布
@@ -319,8 +325,8 @@ target/universal-apple-darwin/release/updater
 Release workflow 只在推送 `v*` tag 时运行，且 tag 必须与 `Cargo.toml` 版本一致：
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.2.2
+git push origin v0.2.2
 ```
 
-GitHub Actions 会构建三个平台的 7z 包、生成 `SHA256SUMS.txt` 并创建 GitHub Release。
+GitHub Actions 会构建六个架构平台的 7z 包、生成 `SHA256SUMS.txt` 并创建 GitHub Release。
