@@ -288,7 +288,7 @@ updater self-update --status
 目前发布目标：
 
 - Linux x86_64 musl
-- Windows x86_64 MSVC
+- Windows x86_64 GNU
 - macOS Universal（Apple Silicon + Intel）
 
 ## 构建
