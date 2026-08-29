@@ -206,18 +206,15 @@ fn download_style(width: usize, prefix_width: usize, label_width: usize) -> Prog
         style(&format!(
             "{{prefix:.cyan}} {{msg:{message_width}!}} [{{bar:{bar_width}.green/black}}] {{bytes}}/{{total_bytes}} {{eta}}"
         ))
-        .progress_chars("=>-")
     } else {
         let usable = width.saturating_sub(prefix_width + 9);
         if usable < 16 {
-            return style("{prefix:.cyan} [{wide_bar:.green/black}] {percent:>3}%")
-                .progress_chars("=>-");
+            return style("{prefix:.cyan} [{wide_bar:.green/black}] {percent:>3}%");
         }
         let (message_width, bar_width) = split_download_width(usable, label_width, 8);
         style(&format!(
             "{{prefix:.cyan}} {{msg:{message_width}!}} [{{bar:{bar_width}.green/black}}] {{percent:>3}}%"
         ))
-        .progress_chars("=>-")
     }
 }
 
@@ -263,7 +260,9 @@ fn current_terminal_width() -> usize {
 }
 
 fn style(template: &str) -> ProgressStyle {
-    ProgressStyle::with_template(template).expect("static progress template")
+    ProgressStyle::with_template(template)
+        .expect("static progress template")
+        .progress_chars("=>-")
 }
 
 #[cfg(test)]
