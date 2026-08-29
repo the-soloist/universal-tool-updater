@@ -79,9 +79,10 @@ pub(super) fn update_tools(
     );
     let workers = effective_jobs(options.jobs, config.network.jobs, selected.len());
     let compression_threads = compression_threads(workers);
-    let progress = ProgressManager::new(
+    let progress = ProgressManager::new_with_workers(
         config.network.progress && !options.no_progress && !options.verbose,
         selected.len(),
+        workers,
     );
     let session = UpdateSession {
         config,
@@ -101,7 +102,7 @@ pub(super) fn update_tools(
     let next = AtomicUsize::new(0);
     let parallel_result = thread::scope(|scope| -> Result<()> {
         let (sender, receiver) = mpsc::channel::<TaskOutcome>();
-        for _ in 0..workers {
+        for slot in 0..workers {
             let sender = sender.clone();
             let selected = &selected;
             let session = &session;
@@ -112,7 +113,10 @@ pub(super) fn update_tools(
                     let Some(tool) = selected.get(index).copied() else {
                         break;
                     };
-                    let task_progress = session.progress.task(&tool.profile, &tool.name);
+                    let task_progress =
+                        session
+                            .progress
+                            .task_in_slot(slot, &tool.profile, &tool.name);
                     let result = session
                         .update_one(tool, &task_progress)
                         .unwrap_or_else(|error| UpdateResult {
@@ -121,14 +125,7 @@ pub(super) fn update_tools(
                             version: None,
                             message: format!("{error:#}"),
                         });
-                    if sender
-                        .send(TaskOutcome {
-                            index,
-                            result,
-                            progress: task_progress,
-                        })
-                        .is_err()
-                    {
+                    if sender.send(TaskOutcome { index, result }).is_err() {
                         break;
                     }
                 }
@@ -152,7 +149,7 @@ pub(super) fn update_tools(
                         format!("update installed but state could not be recorded: {error:#}");
                 }
             }
-            progress.complete(&outcome.progress);
+            progress.complete();
             ordered_results[outcome.index] = Some(outcome.result);
         }
         Ok(())
@@ -296,7 +293,6 @@ impl UpdateSession<'_> {
 struct TaskOutcome {
     index: usize,
     result: UpdateResult,
-    progress: TaskProgress,
 }
 
 fn effective_jobs(command_line: Option<usize>, configured: usize, tools: usize) -> usize {

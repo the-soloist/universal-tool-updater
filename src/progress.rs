@@ -9,6 +9,7 @@ use crate::display::{pad_right, truncate, width as display_width};
 pub(crate) struct ProgressManager {
     multi: MultiProgress,
     overall: ProgressBar,
+    task_bars: Vec<ProgressBar>,
     styles: ProgressStyles,
     enabled: bool,
 }
@@ -34,12 +35,21 @@ struct ProgressStyles {
 }
 
 impl ProgressManager {
+    #[cfg(test)]
     pub(crate) fn new(requested: bool, total: usize) -> Self {
+        Self::new_with_workers(requested, total, 1)
+    }
+
+    pub(crate) fn new_with_workers(requested: bool, total: usize, workers: usize) -> Self {
         let terminal = Term::stderr();
         let enabled = requested && terminal.is_term();
         let width = terminal.size().1 as usize;
         let styles = styles_for_width(width);
         let multi = MultiProgress::new();
+        if enabled {
+            // 固定任务行数量后，使用光标移动覆盖上一帧，避免终端保留历史重绘内容。
+            multi.set_move_cursor(true);
+        }
         let overall = if enabled {
             let bar = multi.add(ProgressBar::new(total as u64));
             bar.set_style(styles.overall.clone());
@@ -48,22 +58,45 @@ impl ProgressManager {
         } else {
             ProgressBar::hidden()
         };
+        let task_bars = if enabled {
+            (0..workers.max(1))
+                .map(|_| {
+                    let bar = multi.add(ProgressBar::new_spinner());
+                    bar.set_style(styles.spinner.clone());
+                    bar.enable_steady_tick(Duration::from_millis(100));
+                    bar
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         Self {
             multi,
             overall,
+            task_bars,
             styles,
             enabled,
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn task(&self, profile: &str, name: &str) -> TaskProgress {
+        self.task_in_slot(0, profile, name)
+    }
+
+    pub(crate) fn task_in_slot(&self, slot: usize, profile: &str, name: &str) -> TaskProgress {
         let prefix = task_prefix(profile, name, current_terminal_width());
         let prefix_width = display_width(&prefix);
         let bar = if self.enabled {
-            let bar = self.multi.add(ProgressBar::new_spinner());
+            let bar = self
+                .task_bars
+                .get(slot)
+                .cloned()
+                .unwrap_or_else(ProgressBar::hidden);
+            bar.reset();
             bar.set_style(self.styles.spinner.clone());
             bar.set_prefix(prefix);
-            bar.enable_steady_tick(Duration::from_millis(100));
+            bar.set_message(String::new());
             bar
         } else {
             ProgressBar::hidden()
@@ -82,19 +115,15 @@ impl ProgressManager {
         }
     }
 
-    pub(crate) fn complete(&self, task: &TaskProgress) {
-        // 先移除任务，避免清理任务和更新总进度连续触发两次重绘。
+    pub(crate) fn complete(&self) {
         if self.enabled {
-            self.multi.remove(&task.bar);
             self.overall.inc(1);
         }
-        task.bar.finish_and_clear();
     }
 
     pub(crate) fn finish(&self) {
         self.overall.finish_and_clear();
         if self.enabled {
-            self.multi.remove(&self.overall);
             let _ = self.multi.clear();
         }
     }
