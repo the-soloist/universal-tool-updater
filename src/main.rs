@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -19,10 +20,21 @@ fn main() -> ExitCode {
         }
     };
     let arguments = std::env::args_os()
-        .map(|argument| argument.to_string_lossy().into_owned())
+        .enumerate()
+        .map(|(index, argument)| {
+            if index == 0 {
+                logging::display_name(Path::new(&argument))
+            } else {
+                argument.to_string_lossy().into_owned()
+            }
+        })
         .collect::<Vec<_>>()
         .join(" ");
-    tracing::info!(log = %log_path.display(), command = %arguments, "updater run started");
+    tracing::info!(
+        log = %logging::display_name(&log_path),
+        command = %arguments,
+        "updater run started"
+    );
 
     match app::run(cli) {
         Ok(RunOutcome::Completed) => {

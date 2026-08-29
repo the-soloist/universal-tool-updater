@@ -37,6 +37,12 @@ pub(crate) fn init(verbose: bool, requested_directory: Option<&Path>) -> Result<
     Ok(path)
 }
 
+pub(crate) fn display_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "<unknown>".to_owned())
+}
+
 fn log_directory(requested: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = requested {
         return if path.is_absolute() {
@@ -70,7 +76,15 @@ fn log_filename() -> Result<String> {
 mod tests {
     use std::path::Path;
 
-    use super::log_directory;
+    use super::{display_name, log_directory};
+
+    #[test]
+    fn displays_only_the_path_filename() {
+        assert_eq!(
+            display_name(Path::new("/tmp/updater/updater-run.log")),
+            "updater-run.log"
+        );
+    }
 
     #[test]
     fn resolves_relative_log_directories_from_the_working_directory() {
