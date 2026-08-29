@@ -115,6 +115,7 @@ pub fn run(options: SelfUpdateOptions) -> Result<SelfUpdateOutcome> {
     verify_candidate(&candidate, &release.version)?;
 
     match replacement::install(&target, &candidate, work_dir, &release.version, &mut lock)? {
+        #[cfg(unix)]
         InstallOutcome::Completed => {
             println!("updater updated successfully to {}", release.tag);
             Ok(SelfUpdateOutcome::Completed)
@@ -264,20 +265,23 @@ fn find_candidate(directory: &Path) -> Result<PathBuf> {
     Ok(candidate)
 }
 
+#[cfg(unix)]
 fn prepare_candidate(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::PermissionsExt;
 
-        let mut permissions = fs::metadata(path)?.permissions();
-        permissions.set_mode(permissions.mode() | 0o755);
-        fs::set_permissions(path, permissions).with_context(|| {
-            format!(
-                "cannot make candidate updater executable at {}",
-                path.display()
-            )
-        })?;
-    }
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(permissions.mode() | 0o755);
+    fs::set_permissions(path, permissions).with_context(|| {
+        format!(
+            "cannot make candidate updater executable at {}",
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn prepare_candidate(_path: &Path) -> Result<()> {
     Ok(())
 }
 

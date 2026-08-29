@@ -15,6 +15,7 @@ use super::WORK_DIRECTORY_PREFIX;
 const HELPER_READY_FILENAME: &str = "helper.ready";
 
 pub(super) enum InstallOutcome {
+    #[cfg(unix)]
     Completed,
     #[cfg(windows)]
     Scheduled,

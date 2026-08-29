@@ -51,6 +51,7 @@ pub(super) fn zip(archive_path: &Path, destination: &Path, password: Option<&str
             let unpacked_size = entry.size();
             let crc32 = entry.crc32();
             extract_zip_lzma(&mut entry, file, unpacked_size, crc32, archive_path)?;
+            #[cfg(unix)]
             set_zip_permissions(&output, &entry)?;
             continue;
         }
@@ -70,6 +71,7 @@ pub(super) fn zip(archive_path: &Path, destination: &Path, password: Option<&str
         }
         let mut file = File::create(&output)?;
         io::copy(&mut entry, &mut file)?;
+        #[cfg(unix)]
         set_zip_permissions(&output, &entry)?;
     }
     Ok(())
@@ -221,8 +223,8 @@ fn lzma_error(archive: &Path, message: String) -> UpdaterError {
     }
 }
 
+#[cfg(unix)]
 fn set_zip_permissions(output: &Path, entry: &ZipFile<'_>) -> Result<()> {
-    #[cfg(unix)]
     if let Some(mode) = entry.unix_mode() {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(output, fs::Permissions::from_mode(mode))?;

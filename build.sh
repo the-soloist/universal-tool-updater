@@ -17,7 +17,7 @@ Examples:
   ./build.sh
   ./build.sh --macos-universal
   ./build.sh --target x86_64-unknown-linux-musl
-  ./build.sh --target x86_64-pc-windows-msvc
+  ./build.sh --target x86_64-pc-windows-gnu
 EOF
 }
 
@@ -98,11 +98,17 @@ if [[ -n "$target" ]]; then
     cargo_args+=(--target "$target")
     artifact_dir="target/$target/release"
 fi
-if [[ "$target" == *linux* && "$(uname -s)" != "Linux" ]]; then
+host_os="$(uname -s)"
+host_is_windows=false
+if [[ "${OS:-}" == "Windows_NT" || "$host_os" == MINGW* || "$host_os" == MSYS* || "$host_os" == CYGWIN* ]]; then
+    host_is_windows=true
+fi
+
+if [[ ("$target" == *linux* && "$host_os" != "Linux") || ("$target" == *windows-gnu && "$host_is_windows" != true) ]]; then
     if command -v cargo-zigbuild >/dev/null 2>&1; then
         cargo_command=(cargo zigbuild)
     else
-        echo "error: cross-compiling Linux from this host requires cargo-zigbuild and Zig" >&2
+        echo "error: this cross-compilation target requires cargo-zigbuild and Zig" >&2
         echo "install it with: cargo install cargo-zigbuild --locked" >&2
         exit 1
     fi
