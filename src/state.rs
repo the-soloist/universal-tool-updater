@@ -81,6 +81,7 @@ impl StateStore {
                 updated_at,
             },
         );
+        // 持久化失败时恢复内存中的旧值，避免重试看到从未写入磁盘的更新。
         if let Err(error) = self.save() {
             if let Some(previous) = previous {
                 self.data.tools.insert(tool_id.to_owned(), previous);

@@ -94,6 +94,7 @@ pub(super) fn response_header(response: &Response, name: &HeaderName) -> Option<
 }
 
 pub(super) fn validator_unchanged(response: &Response, expected: Option<&str>) -> bool {
+    // 部分服务器的范围响应不带校验标识；若返回标识，则必须与已保存的值一致。
     let Some(expected) = expected else {
         return true;
     };

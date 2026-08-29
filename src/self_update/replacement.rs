@@ -73,6 +73,7 @@ pub(super) fn install(
             helper.display()
         )
     })?;
+    // 辅助进程启动后接管该工作区；阻止 TempDir 在父进程退出时删除它，由辅助进程完成替换后清理。
     let work_path = work_dir.keep();
     let spawn = Command::new(&helper)
         .arg("__self-replace")
@@ -100,6 +101,7 @@ pub(super) fn install(
                 let _ = fs::remove_dir_all(&work_path);
                 return Err(error);
             }
+            // 辅助进程已发出就绪信号并等待此锁；先持久化已计划结果再释放，避免辅助进程继续执行时发生竞态。
             if let Err(error) = lock.release_for_handoff() {
                 if let Err(status_error) =
                     super::status::write_failure(target_parent, &version, format!("{error:#}"))

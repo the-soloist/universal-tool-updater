@@ -119,6 +119,7 @@ pub(super) fn prepare_resume(
         );
     }
 
+    // v1 没有哈希检查点，恢复前先为已有字节计算一次哈希，再按 v2 的持久化规则继续下载。
     if metadata.schema_version == LEGACY_SCHEMA_VERSION {
         let hasher = hash_file(partial, file_length)?;
         checkpoint(metadata_path, &mut metadata, file_length, &hasher, false)?;
@@ -163,6 +164,7 @@ pub(super) fn prepare_resume(
             "SHA-256 checkpoint length is inconsistent with the cached file",
         );
     }
+    // 只有最终长度检查点和传输校验都成立时才能信任完成标记，避免写元数据中断后误用半成品缓存。
     if metadata.complete
         && (metadata.verified != Verification::Transport
             || metadata
@@ -183,6 +185,7 @@ pub(super) fn prepare_resume(
         );
     }
 
+    // 文件可能先写入字节、后持久化对应检查点；截去尾部未检查点数据，确保哈希和 HTTP 范围从同一偏移恢复。
     if file_length > checkpoint_length {
         let file = fs::OpenOptions::new()
             .write(true)

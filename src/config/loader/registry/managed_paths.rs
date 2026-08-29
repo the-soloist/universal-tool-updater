@@ -114,6 +114,7 @@ fn paths_conflict(left: &ManagedPath, right: &ManagedPath) -> bool {
     if left.owner != right.owner {
         return true;
     }
+    // 事务备份按设计会与所属工具的目标路径重叠；其他重叠必须在并行更新前拒绝，避免路径竞争。
     if matches!(
         (left.kind, right.kind),
         (

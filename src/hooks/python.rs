@@ -177,6 +177,7 @@ fn collect_pipe(capture: Option<PipeCapture>, stream: &str) -> Result<String> {
     let Some(capture) = capture else {
         return Ok(String::new());
     };
+    // 子进程可能在脚本退出后继承管道；限制排空等待时间，避免无关后代进程让更新器无限期挂起。
     let complete = match capture.finished.recv_timeout(PIPE_DRAIN_GRACE) {
         Ok(result) => {
             result.with_context(|| format!("cannot read Python {stream}"))?;

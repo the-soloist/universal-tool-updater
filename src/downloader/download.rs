@@ -87,6 +87,7 @@ impl Downloader {
                 validator,
             )?;
 
+            // 416 可能表示缓存文件已完整；仅当服务器报告的长度等于缓存长度且已有校验标识未变化时接受。
             if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
                 let remote_total = unsatisfied_total(&response);
                 if requested_offset > 0
@@ -169,6 +170,7 @@ impl Downloader {
                         }
                         .into());
                     }
+                    // 错误的范围响应若直接追加会静默破坏文件，因此丢弃断点状态并从零开始请求。
                     tracing::warn!(
                         tool = %tool.id,
                         url = %artifact.url,

@@ -82,6 +82,7 @@ fn zip_entry_output(
     destination: &Path,
     entry: &ZipFile<'_>,
 ) -> Result<std::path::PathBuf> {
+    // 先校验归档路径再拼接，避免目录穿越条目逃出解压目录。
     let enclosed = entry.enclosed_name().ok_or_else(|| UpdaterError::Archive {
         path: archive.to_path_buf(),
         message: format!("unsafe ZIP entry {:?}", entry.name()),
@@ -103,6 +104,7 @@ fn extract_zip_lzma<R: Read, W: Write>(
     expected_crc32: u32,
     archive: &Path,
 ) -> Result<()> {
+    // 字典大小来自归档文件，因此限制解码器的内存分配上限。
     const MAX_DICTIONARY_SIZE: u32 = 512 * 1024 * 1024;
 
     let mut header = [0_u8; 4];

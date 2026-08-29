@@ -22,6 +22,7 @@ pub(super) fn recover_previous_download(
         return Ok(None);
     };
     let normalized_version = version.strip_prefix('v').unwrap_or(version);
+    // 完成下载会在运行之间共享，只有文件名或 URL 能证明属于当前版本时才复用，避免旧产物冒充新更新。
     if normalized_version.is_empty()
         || (!filename.contains(version)
             && !filename.contains(normalized_version)
