@@ -1,6 +1,14 @@
 # AGENTS
 
-xxx
+本仓库是基于 Rust 的跨平台命令行工具更新器。修改代码时优先保持现有模块边界、错误处理方式和测试风格，不要为了整理目录而进行无关重构。
+
+## 项目约定
+
+- `src/` 同时包含库和二进制入口；共享逻辑放在库模块，命令行启动和日志初始化位于 `src/main.rs`。
+- `build.sh` 是本地和 CI 共用的发布构建入口，使用 `--locked --release`，不要绕过脚本添加另一套构建逻辑。
+- 发布目标为 Linux `x86_64`/`aarch64` musl、Windows `x86_64` GNU/`aarch64` MSVC，以及 macOS `x86_64`/`aarch64`。macOS 分架构构建，不再生成 Universal 二进制。
+- Linux ARM64 交叉构建使用 Zig 和 `cargo-zigbuild`；Windows ARM64 由 Windows CI 验证。除非明确要求，不要在 macOS 上强行链接 Windows ARM64。
+- 自更新资产名称必须与 `.github/workflows/release.yml` 和 `src/self_update.rs` 的平台映射保持一致；修改平台时同步更新 README 和对应测试。
 
 # CODING GUIDE
 
@@ -83,13 +91,25 @@ xxx(xxx): 中文标题
 
 ## 6. 本地验证与 CI
 
-本地优先运行：
+本地验证按改动范围选择最小必要命令，不默认重复完整 CI 矩阵：
+
+- 文档、脚本或 workflow 改动：运行 `git diff --check`，并对 YAML 或 shell 做语法检查。
+- Rust 代码改动：先运行 `cargo fmt -- --check`，再针对受影响的 crate/测试运行 Clippy 和测试。例如日志入口可运行 `cargo clippy --bin updater -- -D warnings` 与 `cargo test --bin updater logging::tests`；库模块可使用 `cargo clippy --lib --all-features -- -D warnings` 和 `cargo test --lib <测试过滤器>`。
+- 构建目标或构建脚本改动：优先验证 macOS ARM64：
+
+  ```bash
+  ./build.sh --target aarch64-apple-darwin
+  ```
+
+  Linux/Windows 其他目标由 CI 矩阵负责交叉构建验证。
+
+只有在修改跨模块公共行为、准备发布，或用户明确要求时，才在本地运行完整测试：
 
 ```bash
 cargo test --all-targets --all-features
 ```
 
-`cargo clippy --all-targets --all-features -- -D warnings` 是静态检查，将警告视为错误；`cargo test --all-targets --all-features` 会编译并执行所有目标的测试。格式检查、Clippy 和构建由 CI 统一执行，本地无需重复运行完整 CI 流程。
+CI 会在每个目标系统上执行完整的格式检查、Clippy、测试和 release 构建；提交前至少完成与改动相关的本地检查，并在最终提交信息中说明未运行的检查及原因。
 
 ---
 
