@@ -12,7 +12,8 @@ use crate::domain::{Tool, UpdateResult, UpdateStatus};
 use crate::downloader::Downloader;
 use crate::hooks::{HookContext, HookRunner, HookStage};
 use crate::installer::{
-    Installer, installation_matches, installed_archive_path, installed_archive_state,
+    ExistingArchiveStatus, InstallOptions, Installer, installation_matches, installed_archive_path,
+    installed_archive_state,
 };
 use crate::progress::{ProgressManager, TaskProgress};
 use crate::resolver::Resolver;
@@ -225,6 +226,7 @@ struct UpdateSession<'a> {
 
 impl UpdateSession<'_> {
     fn update_one(&self, tool: &Tool, progress: &TaskProgress) -> Result<ToolUpdate> {
+        let mut existing_archive = ExistingArchiveStatus::Unchecked;
         if !tool.enabled {
             return Ok(ToolUpdate::new(result(
                 tool,
@@ -275,12 +277,16 @@ impl UpdateSession<'_> {
                             ),
                         });
                     }
-                    Err(error) => tracing::warn!(
-                        tool = %tool.id,
-                        path = %path.display(),
-                        error = %format!("{error:#}"),
-                        "installed archive failed validation; update required"
-                    ),
+                    Err(error) if error.is_invalid() => {
+                        existing_archive = ExistingArchiveStatus::Invalid;
+                        tracing::warn!(
+                            tool = %tool.id,
+                            path = %path.display(),
+                            error = %error,
+                            "installed archive is invalid; rebuilding without its contents"
+                        );
+                    }
+                    Err(error) => return Err(error.into()),
                 }
             }
         }
@@ -347,7 +353,7 @@ impl UpdateSession<'_> {
             &downloaded,
             &workspace,
             progress,
-            self.compression_threads,
+            InstallOptions::new(self.compression_threads, existing_archive),
         )?;
         workspace.clear_partials()?;
         workspace.clear_downloads()?;

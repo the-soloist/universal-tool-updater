@@ -182,7 +182,39 @@ impl ToolWorkspace {
     }
 
     pub(crate) fn clear_downloads(&self) -> Result<()> {
-        clear_directory(&self.downloads, "download", "completed download directory")
+        clear_directory(&self.downloads, "download", "completed download directory")?;
+        for entry in fs::read_dir(&self.downloads_root).with_context(|| {
+            format!(
+                "cannot inspect previous runs in {}",
+                self.downloads_root.display()
+            )
+        })? {
+            let entry = entry.with_context(|| {
+                format!(
+                    "cannot inspect an entry in {}",
+                    self.downloads_root.display()
+                )
+            })?;
+            if entry.path() == self.run_directory
+                || !entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("run-"))
+                || !entry
+                    .file_type()
+                    .with_context(|| format!("cannot inspect {}", entry.path().display()))?
+                    .is_dir()
+            {
+                continue;
+            }
+            // 进程中断可能留下旧 run 下载；工具成功后清掉同工具缓存，不影响其他工具的恢复文件。
+            clear_directory(
+                &entry.path().join(&self.tool_id).join("downloads"),
+                "download",
+                "completed download directory",
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -259,9 +291,15 @@ mod tests {
     }
 
     #[test]
-    fn clears_only_the_completed_downloads_for_one_tool() {
+    fn clears_only_the_completed_downloads_for_one_tool_across_runs() {
         let root = tempdir().unwrap();
         let staging = root.path().join("staging");
+        let previous_first = root.path().join("run-previous/first/downloads");
+        let previous_second = root.path().join("run-previous/second/downloads");
+        fs::create_dir_all(&previous_first).unwrap();
+        fs::create_dir_all(&previous_second).unwrap();
+        fs::write(previous_first.join("artifact.zip"), "previous first").unwrap();
+        fs::write(previous_second.join("artifact.zip"), "previous second").unwrap();
         let run = RunWorkspace::create(root.path(), &staging).unwrap();
         let first = run.prepare(&tool("first", "first")).unwrap();
         let second = run.prepare(&tool("second", "second")).unwrap();
@@ -271,9 +309,14 @@ mod tests {
         first.clear_downloads().unwrap();
 
         assert!(!first.downloads().exists());
+        assert!(!previous_first.exists());
         assert_eq!(
             fs::read_to_string(second.downloads().join("artifact.zip")).unwrap(),
             "second"
+        );
+        assert_eq!(
+            fs::read_to_string(previous_second.join("artifact.zip")).unwrap(),
+            "previous second"
         );
     }
 }

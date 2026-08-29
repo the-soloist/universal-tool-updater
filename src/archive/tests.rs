@@ -134,7 +134,17 @@ fn rejects_a_7z_archive_with_corrupted_contents() {
     file.write_all(&[byte[0] ^ 0xff]).unwrap();
     file.sync_all().unwrap();
 
-    assert!(ArchiveService.verify_7z(&archive).is_err());
+    let error = ArchiveService.verify_7z(&archive).unwrap_err();
+    assert!(error.is_invalid(), "{error:?}");
+}
+
+#[test]
+fn does_not_classify_a_missing_7z_archive_as_corrupt() {
+    let directory = tempdir().unwrap();
+    let archive = directory.path().join("missing.7z");
+
+    let error = ArchiveService.verify_7z(&archive).unwrap_err();
+    assert!(!error.is_invalid());
 }
 
 #[test]

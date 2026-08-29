@@ -2,6 +2,7 @@ mod extract;
 #[cfg(test)]
 mod tests;
 
+use std::fmt;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -105,11 +106,15 @@ impl ArchiveService {
                 message: format!("7z compression failed: {error}"),
             })
         })?;
-        self.verify_7z(destination)
+        self.verify_7z(destination)?;
+        Ok(())
     }
 
     // 压缩完成后重新读取所有条目，触发解码和校验，避免损坏归档进入安装状态。
-    pub(crate) fn verify_7z(&self, archive: &Path) -> Result<()> {
+    pub(crate) fn verify_7z(
+        &self,
+        archive: &Path,
+    ) -> std::result::Result<(), ArchiveVerificationError> {
         let result = (|| {
             let mut reader = ArchiveReader::open(archive, Password::empty())?;
             // 多个工具可并发校验；每个归档限制为单线程，避免按任务数重复占满 CPU。
@@ -120,14 +125,62 @@ impl ArchiveService {
                 Ok(true)
             })
         })();
-        result.map_err(|error| {
-            UpdaterError::Archive {
+        result.map_err(|error| ArchiveVerificationError {
+            invalid: invalid_7z_contents(&error),
+            error: UpdaterError::Archive {
                 path: archive.to_path_buf(),
                 message: format!("7z verification failed: {error}"),
-            }
-            .into()
+            },
         })
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct ArchiveVerificationError {
+    error: UpdaterError,
+    invalid: bool,
+}
+
+impl ArchiveVerificationError {
+    pub(crate) fn is_invalid(&self) -> bool {
+        self.invalid
+    }
+}
+
+impl fmt::Display for ArchiveVerificationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl std::error::Error for ArchiveVerificationError {}
+
+fn invalid_7z_contents(error: &sevenz_rust::Error) -> bool {
+    use sevenz_rust::Error;
+
+    // 文件访问、密码、内存限制和不支持的能力不代表归档已损坏，不能据此丢弃已有内容。
+    matches!(
+        error,
+        Error::BadSignature(_)
+            | Error::ChecksumVerificationFailed
+            | Error::NextHeaderCrcMismatch
+            | Error::Other(_)
+            | Error::BadTerminatedStreamsInfo(_)
+            | Error::BadTerminatedUnpackInfo
+            | Error::BadTerminatedPackInfo(_)
+            | Error::BadTerminatedSubStreamsInfo
+            | Error::BadTerminatedHeader(_)
+    ) || matches!(
+        error,
+        Error::Io(error, _)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::InvalidData
+                    | io::ErrorKind::InvalidInput
+                    | io::ErrorKind::UnexpectedEof
+                    | io::ErrorKind::Other
+            )
+    )
 }
 
 #[derive(Debug, Clone, Copy)]

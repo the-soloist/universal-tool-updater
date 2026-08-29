@@ -32,6 +32,28 @@ pub struct Installer<'a> {
     toolkit_root: &'a Path,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ExistingArchiveStatus {
+    #[default]
+    Unchecked,
+    Invalid,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct InstallOptions {
+    compression_threads: usize,
+    existing_archive: ExistingArchiveStatus,
+}
+
+impl InstallOptions {
+    pub(crate) fn new(compression_threads: usize, existing_archive: ExistingArchiveStatus) -> Self {
+        Self {
+            compression_threads,
+            existing_archive,
+        }
+    }
+}
+
 impl<'a> Installer<'a> {
     pub fn new(
         archive: &'a ArchiveService,
@@ -54,7 +76,7 @@ impl<'a> Installer<'a> {
         artifacts: &[DownloadedArtifact],
         workspace: &ToolWorkspace,
         progress: &TaskProgress,
-        compression_threads: usize,
+        options: InstallOptions,
     ) -> Result<()> {
         if artifacts.is_empty() {
             return Err(UpdaterError::Installation {
@@ -80,7 +102,13 @@ impl<'a> Installer<'a> {
         let output_mode = effective_mode(tool);
 
         if tool.install.existing == ExistingPolicy::Merge && destination.exists() {
-            self.seed_existing(tool, destination, &combined, output_mode)?;
+            self.seed_existing(
+                tool,
+                destination,
+                &combined,
+                output_mode,
+                options.existing_archive,
+            )?;
         }
 
         for (index, artifact) in artifacts.iter().enumerate() {
@@ -143,7 +171,7 @@ impl<'a> Installer<'a> {
                 self.archive.compress_7z_with_threads(
                     &combined,
                     &output.join(name),
-                    compression_threads,
+                    options.compression_threads,
                 )?;
                 output
             }
@@ -187,10 +215,28 @@ impl<'a> Installer<'a> {
         destination: &Path,
         combined: &Path,
         output_mode: OutputMode,
+        existing_archive: ExistingArchiveStatus,
     ) -> Result<()> {
         let archives_existing =
             output_mode == OutputMode::Archive || tool.install.save == OutputMode::Archive;
         if archives_existing && let Some(archive) = managed_archive_path(tool, destination)? {
+            if existing_archive == ExistingArchiveStatus::Invalid {
+                return Ok(());
+            }
+            match self.archive.verify_7z(&archive) {
+                Ok(()) => {}
+                Err(error) if error.is_invalid() => {
+                    // 已损坏的合并基线无法可靠恢复；以发布产物重建，避免修复流程再次解压同一坏包。
+                    tracing::warn!(
+                        tool = %tool.id,
+                        path = %archive.display(),
+                        error = %error,
+                        "existing archive is invalid; rebuilding without its contents"
+                    );
+                    return Ok(());
+                }
+                Err(error) => return Err(error.into()),
+            }
             return self.archive.extract(&archive, combined, None);
         }
         if output_mode == OutputMode::Directory {
