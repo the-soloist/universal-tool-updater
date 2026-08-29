@@ -8,6 +8,7 @@ pub mod downloader;
 pub mod error;
 pub mod hooks;
 pub mod installer;
+pub mod output;
 pub mod paths;
 pub(crate) mod progress;
 pub mod resolver;

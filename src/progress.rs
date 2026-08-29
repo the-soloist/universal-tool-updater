@@ -70,6 +70,9 @@ impl ProgressManager {
         } else {
             Vec::new()
         };
+        if enabled {
+            crate::output::activate_progress(&multi);
+        }
         Self {
             multi,
             overall,
@@ -126,6 +129,13 @@ impl ProgressManager {
         if self.enabled {
             let _ = self.multi.clear();
         }
+        crate::output::deactivate_progress();
+    }
+}
+
+impl Drop for ProgressManager {
+    fn drop(&mut self) {
+        crate::output::deactivate_progress();
     }
 }
 
