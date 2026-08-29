@@ -187,22 +187,15 @@ impl<'a> Installer<'a> {
         combined: &Path,
         output_mode: OutputMode,
     ) -> Result<()> {
-        match output_mode {
-            OutputMode::Directory if tool.install.save == OutputMode::Archive => {
-                if let Some(archive) = managed_archive_path(tool, destination)? {
-                    self.archive.extract(&archive, combined, None)
-                } else {
-                    copy_tree(destination, combined)
-                }
-            }
-            OutputMode::Directory => copy_tree(destination, combined),
-            OutputMode::Archive => {
-                if let Some(archive) = managed_archive_path(tool, destination)? {
-                    self.archive.extract(&archive, combined, None)
-                } else {
-                    Ok(())
-                }
-            }
+        let archives_existing =
+            output_mode == OutputMode::Archive || tool.install.save == OutputMode::Archive;
+        if archives_existing && let Some(archive) = managed_archive_path(tool, destination)? {
+            return self.archive.extract(&archive, combined, None);
+        }
+        if output_mode == OutputMode::Directory {
+            copy_tree(destination, combined)
+        } else {
+            Ok(())
         }
     }
 }
