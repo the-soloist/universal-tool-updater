@@ -1,7 +1,5 @@
-use std::fs;
 use std::path::Path;
 
-use tempfile::tempdir;
 use universal_tool_updater::config;
 
 #[test]
@@ -19,7 +17,10 @@ fn local_profile_manifest_is_valid_when_present() {
         .to_path_buf();
 
     assert!(!config.tools.is_empty());
-    assert!(config.paths.toolkit_root.ends_with("Tools/Toolkit"));
+    assert!(
+        config.paths.toolkit_root.is_absolute(),
+        "toolkit root should be resolved to an absolute path"
+    );
     assert_eq!(config.paths.downloads, updater_directory.join("updates"));
     assert_eq!(config.paths.staging, config.paths.downloads.join("staging"));
     assert!(config.paths.state.starts_with(&config.paths.toolkit_root));
@@ -36,33 +37,12 @@ fn local_profile_manifest_is_valid_when_present() {
 }
 
 #[test]
-fn example_profile_remains_valid_and_disabled() {
-    let source = Path::new("examples/profile.yaml");
-    assert!(source.is_file(), "example profile is missing");
+fn example_manifest_and_profile_remain_valid_and_disabled() {
+    let manifest = Path::new("examples/manifest.yaml");
+    assert!(manifest.is_file(), "example manifest is missing");
 
-    let directory = tempdir().unwrap();
-    fs::copy(source, directory.path().join("example.yaml")).unwrap();
-    fs::write(
-        directory.path().join("manifest.yaml"),
-        r#"
-schema_version: 5
-include: [example.yaml]
-paths:
-  toolkit_root: ExampleToolkit
-  downloads: example-updates
-  state: .updater/example-state.yaml
-defaults:
-  install:
-    input: extract
-    existing: replace
-    save: directory
-    strip_single_root: true
-    archive_name: '{name}#{version}.7z'
-"#,
-    )
-    .unwrap();
-
-    let loaded = config::load(&directory.path().join("manifest.yaml")).unwrap();
+    let loaded = config::load(manifest).unwrap();
     assert_eq!(loaded.tools.len(), 4);
+    assert_eq!(loaded.network.jobs, 4);
     assert!(loaded.tools.values().all(|tool| !tool.enabled));
 }

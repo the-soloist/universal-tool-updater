@@ -1,0 +1,42 @@
+# Manifest 文件示例。
+#
+# 将 manifest.yaml 与 profile.yaml 一起复制到同一个 profiles 目录后，运行：
+#   updater --profiles /path/to/profiles check
+
+schema_version: 5
+
+# 只加载这里明确列出的 profile 文件；路径相对于本文件所在目录。
+include:
+  - profile.yaml
+
+paths:
+  # 相对安装路径、版本文件和符号链接目标都以 toolkit_root 为根。
+  toolkit_root: ~/Tools/Toolkit
+
+  # downloads 和 staging 的相对路径以 updater 可执行文件所在目录为根。
+  downloads: updates
+  staging: updates/staging
+
+  # state 的相对路径以 toolkit_root 为根。
+  state: .updater/example-state.yaml
+
+network:
+  user_agent: Universal-Tool-Updater/3
+  timeout_seconds: 60
+  progress: true
+  github_token_env: GITHUB_TOKEN
+
+  # 同时执行的完整工具更新任务数，可用 updater update --jobs N 覆盖。
+  jobs: 4
+
+defaults:
+  # 目标目录不存在时允许创建。
+  create_destination: true
+
+  # 工具 profile 可以逐字段覆盖这些默认安装参数。
+  install:
+    input: extract
+    existing: replace
+    save: directory
+    strip_single_root: true
+    archive_name: '{name}#{version}.7z'

@@ -90,7 +90,7 @@ tools:
 
 Profile 名称来自文件名，因此 `tools.yaml` 对应 `tools` profile。只有 `manifest.yaml` 的 `include` 中列出的文件会被加载。
 
-可直接复制修改的完整 profile 见 [examples/profile.yaml](examples/profile.yaml)；全部字段、组合约束和更多说明见 [YAML 配置文件编写规范](docs/YAML_CONFIGURATION.md)。
+可直接复制修改的完整配置见 [examples/manifest.yaml](examples/manifest.yaml) 和 [examples/profile.yaml](examples/profile.yaml)；全部字段、组合约束和更多说明见 [YAML 配置文件编写规范](docs/YAML_CONFIGURATION.md)。
 
 ### 3. 检查并运行
 
@@ -184,10 +184,14 @@ updater update --no-progress
 
 ```text
 updates/
-├── .partial/          # 可跨运行保留的断点续传文件
+├── .partial/          # 未完成分片及已下载、等待安装的产物
 └── staging/
     └── run-*/         # 本次更新的事务暂存，结束后清理
 ```
+
+多产物工具会保留每个已完成的下载，直到该工具整体安装成功。运行被中断后，下一次更新会校验并复用这些文件，从第一个尚未完成的产物继续；旧版本遗留在 `run-*/<tool-id>/downloads/` 中的完整文件也会自动恢复，无需手工移动。
+
+每个 `.part` 文件都有一份 schema v2 YAML 元数据，记录 URL、文件名、远端总大小、ETag / Last-Modified、已确认字节数、SHA-256、完成状态和校验级别。下载过程中每 8 MiB 先同步文件，再原子更新 SHA-256 校验点；下次续传前会重新计算已有分片的哈希。哈希不一致的缓存会被删除并从头下载，异常退出后位于最后一个校验点之后的未确认尾部会被截断。`verified: transport` 表示 HTTP 传输完整性已经确认，不代表压缩包内容已经通过解压校验。
 
 如果 staging 和安装目标位于同一文件系统，最终通过 `rename` 原子提交；如果跨文件系统，则只在最终提交阶段于目标父目录创建短生命周期的 `.工具名-commit-*` 目录。
 
@@ -297,14 +301,14 @@ updater self-update --status
 
 # 指定 Rust target
 ./build.sh --target x86_64-unknown-linux-musl
-./build.sh --target x86_64-pc-windows-msvc
+./build.sh --target x86_64-pc-windows-gnu
 
 # macOS Universal
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 ./build.sh --macos-universal
 ```
 
-Linux 交叉构建需要目标链接器；macOS 上安装 Zig 和 `cargo-zigbuild` 后，脚本可自动交叉构建 Linux musl 版本。macOS Universal 产物位于：
+Linux 和 Windows GNU 交叉构建需要目标链接器；macOS 上安装 Zig、`cargo-zigbuild` 并执行 `rustup target add x86_64-pc-windows-gnu` 后，脚本会自动使用 Zig 构建 Windows GNU 版本。Windows GNU 产物位于 `target/x86_64-pc-windows-gnu/release/updater.exe`。macOS Universal 产物位于：
 
 ```text
 target/universal-apple-darwin/release/updater
