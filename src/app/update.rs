@@ -266,10 +266,10 @@ impl UpdateSession<'_> {
             .map(|(index, artifact)| {
                 self.downloader.download(
                     tool,
+                    &release.version,
                     artifact,
                     &workspace,
-                    index,
-                    release.artifacts.len(),
+                    (index, release.artifacts.len()),
                     progress,
                 )
             })

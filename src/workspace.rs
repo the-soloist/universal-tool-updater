@@ -9,6 +9,7 @@ use crate::domain::Tool;
 pub(crate) struct RunWorkspace {
     directory: TempDir,
     staging: TempDir,
+    downloads_root: PathBuf,
     partials: PathBuf,
 }
 
@@ -17,6 +18,9 @@ pub(crate) struct ToolWorkspace {
     downloads: PathBuf,
     unpacked: PathBuf,
     staging: PathBuf,
+    downloads_root: PathBuf,
+    run_directory: PathBuf,
+    tool_id: String,
     partials: PathBuf,
 }
 
@@ -52,6 +56,7 @@ impl RunWorkspace {
         Ok(Self {
             directory,
             staging,
+            downloads_root: downloads_root.to_path_buf(),
             partials: downloads_root.join(".partial"),
         })
     }
@@ -94,6 +99,9 @@ impl RunWorkspace {
             downloads,
             unpacked,
             staging,
+            downloads_root: self.downloads_root.clone(),
+            run_directory: self.directory.path().to_path_buf(),
+            tool_id: tool.id.clone(),
             partials,
         })
     }
@@ -114,6 +122,55 @@ impl ToolWorkspace {
 
     pub(crate) fn partials(&self) -> &Path {
         &self.partials
+    }
+
+    pub(crate) fn recoverable_download(&self, filename: &str) -> Result<Option<PathBuf>> {
+        let mut largest = None::<(u64, PathBuf)>;
+        for entry in fs::read_dir(&self.downloads_root).with_context(|| {
+            format!(
+                "cannot inspect previous runs in {}",
+                self.downloads_root.display()
+            )
+        })? {
+            let entry = entry.with_context(|| {
+                format!(
+                    "cannot inspect an entry in {}",
+                    self.downloads_root.display()
+                )
+            })?;
+            let path = entry.path();
+            if path == self.run_directory
+                || !entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("run-"))
+                || !entry
+                    .file_type()
+                    .with_context(|| format!("cannot inspect {}", path.display()))?
+                    .is_dir()
+            {
+                continue;
+            }
+
+            let candidate = path.join(&self.tool_id).join("downloads").join(filename);
+            let metadata = match fs::symlink_metadata(&candidate) {
+                Ok(metadata) if metadata.file_type().is_file() => metadata,
+                Ok(_) => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("cannot inspect previous download {}", candidate.display())
+                    });
+                }
+            };
+            if largest
+                .as_ref()
+                .is_none_or(|(length, _)| metadata.len() > *length)
+            {
+                largest = Some((metadata.len(), candidate));
+            }
+        }
+        Ok(largest.map(|(_, path)| path))
     }
 
     pub(crate) fn clear_partials(&self) -> Result<()> {

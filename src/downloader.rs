@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{Read, Write};
 use std::path::Path;
 use std::thread;
 
@@ -7,6 +7,8 @@ use anyhow::{Context, Result};
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
 use reqwest::header::{CONTENT_RANGE, ETAG, LAST_MODIFIED};
+use sha2::{Digest, Sha256};
+use tempfile::NamedTempFile;
 mod http;
 mod partial;
 
@@ -20,10 +22,13 @@ use http::{
     ATTEMPTS, RETRY_DELAY, byte_range, filename_from_disposition, response_header, send_with_retry,
     unsatisfied_total, validator_unchanged,
 };
-use partial::{Metadata as PartialMetadata, clear as clear_partial, length as partial_length};
 use partial::{
-    load as load_partial_metadata, paths as partial_paths, save as save_partial_metadata,
+    Metadata as PartialMetadata, Verification, checkpoint as checkpoint_partial,
+    clear as clear_partial, length as partial_length, load as load_partial_metadata,
+    paths as partial_paths, prepare_resume,
 };
+
+const HASH_CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024;
 
 pub struct Downloader {
     client: Client,
@@ -37,12 +42,13 @@ impl Downloader {
     pub(crate) fn download(
         &self,
         tool: &Tool,
+        version: &str,
         artifact: &ResolvedArtifact,
         workspace: &ToolWorkspace,
-        index: usize,
-        artifacts: usize,
+        position: (usize, usize),
         progress: &TaskProgress,
     ) -> Result<DownloadedArtifact> {
+        let (index, artifacts) = position;
         let directory = workspace.downloads();
         let completion = DownloadCompletion {
             tool,
@@ -60,7 +66,16 @@ impl Downloader {
         })?;
         let (temporary, metadata_path) = partial_paths(partial_directory, &artifact.url);
         let mut metadata = load_partial_metadata(&metadata_path, &temporary, &artifact.url)?;
-        let mut downloaded = partial_length(metadata.as_ref(), &temporary)?;
+        let downloaded = partial_length(metadata.as_ref(), &temporary)?;
+        if let Some((recovered, _recovered_length)) =
+            recover_previous_download(tool, version, artifact, workspace, &temporary, downloaded)?
+        {
+            metadata = Some(recovered);
+        }
+        let resume = prepare_resume(&metadata_path, &temporary, metadata)?;
+        let mut metadata = resume.metadata;
+        let mut downloaded = resume.downloaded;
+        let mut hasher = resume.hasher;
 
         let mut transfer_attempt = 1;
         loop {
@@ -82,16 +97,24 @@ impl Downloader {
                         .as_ref()
                         .is_some_and(|partial| validator_unchanged(&response, partial.validator()))
                 {
-                    let partial = metadata.as_ref().context(
+                    let partial = metadata.as_mut().context(
                         "partial download metadata disappeared before finalizing the download",
+                    )?;
+                    partial.total = remote_total;
+                    let digest = checkpoint_partial(
+                        &metadata_path,
+                        partial,
+                        requested_offset,
+                        &hasher,
+                        true,
                     )?;
                     progress.download(index + 1, artifacts, &partial.filename, remote_total);
                     progress.set_position(requested_offset);
                     return completion.finalize(
                         &temporary,
-                        &metadata_path,
                         &partial.filename,
                         requested_offset,
+                        &digest,
                     );
                 }
 
@@ -105,6 +128,7 @@ impl Downloader {
                 clear_partial(&metadata_path, &temporary)?;
                 metadata = None;
                 downloaded = 0;
+                hasher = Sha256::new();
                 continue;
             }
 
@@ -157,6 +181,7 @@ impl Downloader {
                     clear_partial(&metadata_path, &temporary)?;
                     metadata = None;
                     downloaded = 0;
+                    hasher = Sha256::new();
                     continue;
                 }
             } else if requested_offset > 0 {
@@ -168,6 +193,7 @@ impl Downloader {
                     "server did not resume the download; restarting from zero"
                 );
                 downloaded = 0;
+                hasher = Sha256::new();
             }
             let append = requested_offset > 0 && status == StatusCode::PARTIAL_CONTENT;
 
@@ -213,6 +239,10 @@ impl Downloader {
                         .flatten()
                 }),
                 total,
+                downloaded: None,
+                sha256: None,
+                complete: false,
+                verified: Verification::None,
             };
             let mut output = fs::OpenOptions::new()
                 .create(true)
@@ -223,9 +253,10 @@ impl Downloader {
                 .with_context(|| format!("cannot open partial download {}", temporary.display()))?;
             if !append {
                 downloaded = 0;
+                hasher = Sha256::new();
             }
-            save_partial_metadata(&metadata_path, &next_metadata)?;
-            metadata = Some(next_metadata);
+            let mut next_metadata = next_metadata;
+            let mut last_checkpoint = downloaded;
 
             tracing::debug!(
                 tool = %tool.id,
@@ -249,7 +280,21 @@ impl Downloader {
                             format!("cannot write download file {}", temporary.display())
                         })?;
                         downloaded += read as u64;
+                        hasher.update(&buffer[..read]);
                         progress.inc(read as u64);
+                        if downloaded.saturating_sub(last_checkpoint) >= HASH_CHECKPOINT_BYTES {
+                            output.sync_data().with_context(|| {
+                                format!("cannot sync download file {}", temporary.display())
+                            })?;
+                            checkpoint_partial(
+                                &metadata_path,
+                                &mut next_metadata,
+                                downloaded,
+                                &hasher,
+                                false,
+                            )?;
+                            last_checkpoint = downloaded;
+                        }
                     }
                     Err(error) => break Some(format!("cannot read response body: {error}")),
                 }
@@ -258,6 +303,13 @@ impl Downloader {
                 .sync_all()
                 .with_context(|| format!("cannot sync download file {}", temporary.display()))?;
             drop(output);
+            checkpoint_partial(
+                &metadata_path,
+                &mut next_metadata,
+                downloaded,
+                &hasher,
+                false,
+            )?;
 
             let transfer_error = transfer_error.or_else(|| {
                 response_end
@@ -269,6 +321,7 @@ impl Downloader {
                     })
             });
             if let Some(message) = transfer_error {
+                metadata = Some(next_metadata);
                 if transfer_attempt < ATTEMPTS {
                     tracing::warn!(
                         tool = %tool.id,
@@ -302,13 +355,127 @@ impl Downloader {
             if status == StatusCode::PARTIAL_CONTENT
                 && total.is_some_and(|total| downloaded < total)
             {
+                metadata = Some(next_metadata);
                 transfer_attempt = 1;
                 continue;
             }
 
-            return completion.finalize(&temporary, &metadata_path, &filename, downloaded);
+            let digest = checkpoint_partial(
+                &metadata_path,
+                &mut next_metadata,
+                downloaded,
+                &hasher,
+                true,
+            )?;
+            return completion.finalize(&temporary, &filename, downloaded, &digest);
         }
     }
+}
+
+fn recover_previous_download(
+    tool: &Tool,
+    version: &str,
+    artifact: &ResolvedArtifact,
+    workspace: &ToolWorkspace,
+    partial: &Path,
+    current_length: u64,
+) -> Result<Option<(PartialMetadata, u64)>> {
+    let Some(filename) = artifact.filename.as_deref().and_then(safe_filename) else {
+        return Ok(None);
+    };
+    let normalized_version = version.strip_prefix('v').unwrap_or(version);
+    if normalized_version.is_empty()
+        || (!filename.contains(version)
+            && !filename.contains(normalized_version)
+            && !artifact.url.contains(version)
+            && !artifact.url.contains(normalized_version))
+    {
+        return Ok(None);
+    }
+    let Some(previous) = workspace.recoverable_download(&filename)? else {
+        return Ok(None);
+    };
+    let previous_length = fs::metadata(&previous)
+        .with_context(|| format!("cannot inspect previous download {}", previous.display()))?
+        .len();
+    if previous_length <= current_length {
+        return Ok(None);
+    }
+
+    if current_length == 0 {
+        materialize_file(&previous, partial)
+    } else {
+        replace_file(&previous, partial)
+    }
+    .with_context(|| {
+        format!(
+            "cannot recover completed download {} for {}",
+            previous.display(),
+            tool.id
+        )
+    })?;
+    let metadata = PartialMetadata {
+        schema_version: 1,
+        url: artifact.url.clone(),
+        filename,
+        etag: None,
+        last_modified: None,
+        total: Some(previous_length),
+        downloaded: None,
+        sha256: None,
+        complete: false,
+        verified: Verification::None,
+    };
+    tracing::debug!(
+        tool = %tool.id,
+        filename = %metadata.filename,
+        bytes = previous_length,
+        replaced_bytes = current_length,
+        source = %previous.display(),
+        "recovered completed artifact from an interrupted run"
+    );
+    Ok(Some((metadata, previous_length)))
+}
+
+fn materialize_file(source: &Path, destination: &Path) -> Result<()> {
+    match fs::hard_link(source, destination) {
+        Ok(()) => Ok(()),
+        Err(link_error) => replace_file(source, destination).with_context(|| {
+            format!(
+                "cannot copy cached download {} to {} after hard-link failed: {link_error}",
+                source.display(),
+                destination.display()
+            )
+        }),
+    }
+}
+
+fn replace_file(source: &Path, destination: &Path) -> Result<()> {
+    let parent = destination.parent().unwrap_or(Path::new("."));
+    let mut temporary = NamedTempFile::new_in(parent).with_context(|| {
+        format!(
+            "cannot create a temporary cache file in {}",
+            parent.display()
+        )
+    })?;
+    let mut input = fs::File::open(source)
+        .with_context(|| format!("cannot open cached download {}", source.display()))?;
+    std::io::copy(&mut input, temporary.as_file_mut()).with_context(|| {
+        format!(
+            "cannot copy cached download {} to {}",
+            source.display(),
+            temporary.path().display()
+        )
+    })?;
+    temporary
+        .as_file()
+        .sync_all()
+        .with_context(|| format!("cannot sync cached download {}", temporary.path().display()))?;
+    temporary
+        .persist(destination)
+        .map_err(|error| error.error)
+        .with_context(|| format!("cannot replace cached download {}", destination.display()))?;
+    Ok(())
 }
 
 struct DownloadCompletion<'a> {
@@ -323,9 +490,9 @@ impl DownloadCompletion<'_> {
     fn finalize(
         &self,
         partial: &Path,
-        metadata: &Path,
         filename: &str,
         downloaded: u64,
+        sha256: &str,
     ) -> Result<DownloadedArtifact> {
         let destination = self.directory.join(filename);
         if destination.exists() {
@@ -335,19 +502,13 @@ impl DownloadCompletion<'_> {
             }
             .into());
         }
-        fs::rename(partial, &destination).with_context(|| {
+        materialize_file(partial, &destination).with_context(|| {
             format!(
-                "cannot finalize download {} -> {}",
+                "cannot materialize cached download {} -> {}",
                 partial.display(),
                 destination.display()
             )
         })?;
-        if let Err(error) = fs::remove_file(metadata)
-            && error.kind() != ErrorKind::NotFound
-        {
-            return Err(error)
-                .with_context(|| format!("cannot remove partial metadata {}", metadata.display()));
-        }
         tracing::debug!(
             tool = %self.tool.id,
             artifact = self.index + 1,
@@ -355,8 +516,9 @@ impl DownloadCompletion<'_> {
             filename,
             url = %self.artifact.url,
             bytes = downloaded,
+            sha256,
             path = %destination.display(),
-            "artifact download completed"
+            "artifact download completed and cached until installation succeeds"
         );
         Ok(DownloadedArtifact { path: destination })
     }
