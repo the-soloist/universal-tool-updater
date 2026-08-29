@@ -13,7 +13,7 @@ use filesystem::{apply_executable_bits, copy_tree, single_directory_base};
 use output::{effective_mode, managed_archive_path, render_archive_name};
 use transaction::{CommitRequest, CommitSource, commit, same_filesystem};
 
-pub(crate) use output::installation_matches;
+pub(crate) use output::{installation_matches, installed_archive_path, installed_archive_state};
 
 use crate::archive::ArchiveService;
 use crate::domain::{
@@ -113,6 +113,7 @@ impl<'a> Installer<'a> {
         }
 
         apply_executable_bits(tool, &combined)?;
+        // Copy 输入的目录输出把版本标记放在目标目录旁，避免把元数据混入用户文件。
         let external_version = (output_mode == OutputMode::Directory
             && tool.install.input == InputMode::Copy)
             .then(|| transaction.join(VERSION_FILE));

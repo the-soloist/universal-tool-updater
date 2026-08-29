@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use tempfile::tempdir;
@@ -111,6 +111,30 @@ fn round_trips_multithreaded_7z_archives() {
     ArchiveService.extract(&archive, &output, None).unwrap();
     assert_eq!(fs::read_to_string(output.join("tool.txt")).unwrap(), "ok");
     assert!(output.join("empty").is_dir());
+}
+
+#[test]
+fn rejects_a_7z_archive_with_corrupted_contents() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("source");
+    let archive = directory.path().join("source.7z");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("tool.txt"), "payload").unwrap();
+    ArchiveService.compress_7z(&source, &archive).unwrap();
+
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&archive)
+        .unwrap();
+    file.seek(SeekFrom::Start(32)).unwrap();
+    let mut byte = [0];
+    file.read_exact(&mut byte).unwrap();
+    file.seek(SeekFrom::Start(32)).unwrap();
+    file.write_all(&[byte[0] ^ 0xff]).unwrap();
+    file.sync_all().unwrap();
+
+    assert!(ArchiveService.verify_7z(&archive).is_err());
 }
 
 #[test]

@@ -11,10 +11,12 @@ use crate::config::AppConfig;
 use crate::domain::{Tool, UpdateResult, UpdateStatus};
 use crate::downloader::Downloader;
 use crate::hooks::{HookContext, HookRunner, HookStage};
-use crate::installer::{Installer, installation_matches};
+use crate::installer::{
+    Installer, installation_matches, installed_archive_path, installed_archive_state,
+};
 use crate::progress::{ProgressManager, TaskProgress};
 use crate::resolver::Resolver;
-use crate::state::StateStore;
+use crate::state::{ArchiveState, StateStore};
 use crate::workspace::RunWorkspace;
 
 use super::report::print_summary;
@@ -59,6 +61,15 @@ pub(super) fn update_tools(
                 .map(|version| (tool.id.clone(), version.to_owned()))
         })
         .collect::<BTreeMap<_, _>>();
+    // 归档输出还需记录文件身份，避免仅凭版本号跳过已被替换的归档。
+    let state_archives = selected
+        .iter()
+        .filter_map(|tool| {
+            state
+                .archive(&tool.id)
+                .map(|archive| (tool.id.clone(), archive.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
     let resolver = Resolver::new(&config.network)?;
     let downloader = Downloader::new(resolver.client().clone());
     let workspace = if options.dry_run {
@@ -88,9 +99,11 @@ pub(super) fn update_tools(
         config,
         resolver: &resolver,
         downloader: &downloader,
+        archive: &archive,
         installer: &installer,
         hooks: &hooks,
         state_versions: &state_versions,
+        state_archives: &state_archives,
         workspace: workspace.as_ref(),
         progress: &progress,
         compression_threads,
@@ -117,15 +130,25 @@ pub(super) fn update_tools(
                         session
                             .progress
                             .task_in_slot(slot, &tool.profile, &tool.name);
-                    let result = session
+                    let update = session
                         .update_one(tool, &task_progress)
-                        .unwrap_or_else(|error| UpdateResult {
-                            tool_id: tool.id.clone(),
-                            status: UpdateStatus::Failed,
-                            version: None,
-                            message: format!("{error:#}"),
+                        .unwrap_or_else(|error| ToolUpdate {
+                            archive: None,
+                            result: UpdateResult {
+                                tool_id: tool.id.clone(),
+                                status: UpdateStatus::Failed,
+                                version: None,
+                                message: format!("{error:#}"),
+                            },
                         });
-                    if sender.send(TaskOutcome { index, result }).is_err() {
+                    if sender
+                        .send(TaskOutcome {
+                            index,
+                            result: update.result,
+                            archive: update.archive,
+                        })
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -137,17 +160,32 @@ pub(super) fn update_tools(
             let mut outcome = receiver
                 .recv()
                 .context("update worker stopped before returning every tool result")?;
-            if outcome.result.status == UpdateStatus::Updated {
-                let version = outcome
-                    .result
-                    .version
-                    .as_deref()
-                    .expect("updated results always contain a version");
-                if let Err(error) = state.record(&outcome.result.tool_id, version) {
-                    outcome.result.status = UpdateStatus::Failed;
-                    outcome.result.message =
-                        format!("update installed but state could not be recorded: {error:#}");
+            // 仅在安装完成或归档已验证后更新状态，失败结果不能污染下次更新判断。
+            let record = match outcome.result.status {
+                UpdateStatus::Updated => {
+                    let version = outcome
+                        .result
+                        .version
+                        .as_deref()
+                        .expect("updated results always contain a version");
+                    let tool = selected[outcome.index];
+                    installed_archive_state(tool, version).and_then(|archive| {
+                        state.record_installation(&outcome.result.tool_id, version, archive)
+                    })
                 }
+                UpdateStatus::Current => outcome.archive.take().map_or(Ok(()), |archive| {
+                    state.record_archive(&outcome.result.tool_id, archive)
+                }),
+                _ => Ok(()),
+            };
+            if let Err(error) = record {
+                let message = if outcome.result.status == UpdateStatus::Updated {
+                    "update installed but installation state could not be recorded"
+                } else {
+                    "installed archive verified but its state could not be recorded"
+                };
+                outcome.result.status = UpdateStatus::Failed;
+                outcome.result.message = format!("{message}: {error:#}");
             }
             progress.complete();
             ordered_results[outcome.index] = Some(outcome.result);
@@ -174,9 +212,11 @@ struct UpdateSession<'a> {
     config: &'a AppConfig,
     resolver: &'a Resolver,
     downloader: &'a Downloader,
+    archive: &'a ArchiveService,
     installer: &'a Installer<'a>,
     hooks: &'a HookRunner,
     state_versions: &'a BTreeMap<String, String>,
+    state_archives: &'a BTreeMap<String, ArchiveState>,
     workspace: Option<&'a RunWorkspace>,
     progress: &'a ProgressManager,
     compression_threads: usize,
@@ -184,35 +224,65 @@ struct UpdateSession<'a> {
 }
 
 impl UpdateSession<'_> {
-    fn update_one(&self, tool: &Tool, progress: &TaskProgress) -> Result<UpdateResult> {
+    fn update_one(&self, tool: &Tool, progress: &TaskProgress) -> Result<ToolUpdate> {
         if !tool.enabled {
-            return Ok(result(tool, UpdateStatus::Skipped, None, "disabled"));
+            return Ok(ToolUpdate::new(result(
+                tool,
+                UpdateStatus::Skipped,
+                None,
+                "disabled",
+            )));
         }
         if !tool.install.destination.exists()
             && !tool.install.create_destination
             && !self.options.create_missing
         {
-            return Ok(result(
+            return Ok(ToolUpdate::new(result(
                 tool,
                 UpdateStatus::Skipped,
                 None,
                 "destination does not exist",
-            ));
+            )));
         }
 
         progress.stage("resolve");
         let release = self.resolver.resolve(tool)?;
-        if !self.options.force
-            && self.state_versions.get(&tool.id).map(String::as_str)
-                == Some(release.version.as_str())
-            && installation_matches(tool, &release.version)
-        {
-            return Ok(result(
-                tool,
-                UpdateStatus::Current,
-                Some(&release.version),
-                "already current",
-            ));
+        let recorded_version_matches =
+            self.state_versions.get(&tool.id).map(String::as_str) == Some(release.version.as_str());
+        if !self.options.force && recorded_version_matches {
+            if installation_matches(tool, &release.version, self.state_archives.get(&tool.id)) {
+                return Ok(ToolUpdate::new(result(
+                    tool,
+                    UpdateStatus::Current,
+                    Some(&release.version),
+                    "already current",
+                )));
+            }
+            // 旧状态没有归档身份，或文件身份已变化时，仅做一次完整校验并刷新凭据。
+            if let Some(path) = installed_archive_path(tool, &release.version) {
+                progress.stage("verify");
+                match self.archive.verify_7z(&path) {
+                    Ok(()) => {
+                        let archive = installed_archive_state(tool, &release.version)?
+                            .expect("archive output always produces archive state");
+                        return Ok(ToolUpdate {
+                            archive: Some(archive),
+                            result: result(
+                                tool,
+                                UpdateStatus::Current,
+                                Some(&release.version),
+                                "already current",
+                            ),
+                        });
+                    }
+                    Err(error) => tracing::warn!(
+                        tool = %tool.id,
+                        path = %path.display(),
+                        error = %format!("{error:#}"),
+                        "installed archive failed validation; update required"
+                    ),
+                }
+            }
         }
         if self.options.dry_run {
             let urls = release
@@ -228,12 +298,12 @@ impl UpdateSession<'_> {
                 artifacts = %urls,
                 "planned update"
             );
-            return Ok(result(
+            return Ok(ToolUpdate::new(result(
                 tool,
                 UpdateStatus::Planned,
                 Some(&release.version),
                 "dry run",
-            ));
+            )));
         }
 
         let workspace = self
@@ -281,18 +351,33 @@ impl UpdateSession<'_> {
         )?;
         workspace.clear_partials()?;
         workspace.clear_downloads()?;
-        Ok(result(
+        Ok(ToolUpdate::new(result(
             tool,
             UpdateStatus::Updated,
             Some(&release.version),
             "update complete",
-        ))
+        )))
     }
 }
 
 struct TaskOutcome {
     index: usize,
     result: UpdateResult,
+    archive: Option<ArchiveState>,
+}
+
+struct ToolUpdate {
+    result: UpdateResult,
+    archive: Option<ArchiveState>,
+}
+
+impl ToolUpdate {
+    fn new(result: UpdateResult) -> Self {
+        Self {
+            result,
+            archive: None,
+        }
+    }
 }
 
 fn effective_jobs(command_line: Option<usize>, configured: usize, tools: usize) -> usize {

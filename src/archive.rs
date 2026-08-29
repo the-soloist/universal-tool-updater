@@ -3,11 +3,12 @@ mod extract;
 mod tests;
 
 use std::fs;
+use std::io;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use sevenz_rust::encoder_options::Lzma2Options;
-use sevenz_rust::{ArchiveEntry, ArchiveWriter};
+use sevenz_rust::{ArchiveEntry, ArchiveReader, ArchiveWriter, Password};
 use walkdir::WalkDir;
 
 use crate::error::UpdaterError;
@@ -78,9 +79,13 @@ impl ArchiveService {
         let result = (|| {
             let mut writer = ArchiveWriter::create(destination)?;
             let threads = u32::try_from(threads.max(1)).unwrap_or(u32::MAX);
-            writer.set_content_methods(vec![
-                Lzma2Options::from_level_mt(6, threads, 16 * 1024 * 1024).into(),
-            ]);
+            // 单线程不设置分块参数，避免无并行收益时仍切换 LZMA2 流边界。
+            let lzma = if threads == 1 {
+                Lzma2Options::from_level(6)
+            } else {
+                Lzma2Options::from_level_mt(6, threads, 16 * 1024 * 1024)
+            };
+            writer.set_content_methods(vec![lzma.into()]);
             for directory in &directories {
                 let name = directory
                     .strip_prefix(source)
@@ -95,9 +100,30 @@ impl ArchiveService {
             Ok::<(), sevenz_rust::Error>(())
         })();
         result.map_err(|error| {
-            UpdaterError::Archive {
+            anyhow::Error::from(UpdaterError::Archive {
                 path: source.to_path_buf(),
                 message: format!("7z compression failed: {error}"),
+            })
+        })?;
+        self.verify_7z(destination)
+    }
+
+    // 压缩完成后重新读取所有条目，触发解码和校验，避免损坏归档进入安装状态。
+    pub(crate) fn verify_7z(&self, archive: &Path) -> Result<()> {
+        let result = (|| {
+            let mut reader = ArchiveReader::open(archive, Password::empty())?;
+            // 多个工具可并发校验；每个归档限制为单线程，避免按任务数重复占满 CPU。
+            reader.set_thread_count(1);
+            reader.for_each_entries(|_, contents| {
+                // 必须消费完整解码流，读取头信息本身不会触发每个条目的 CRC 校验。
+                io::copy(contents, &mut io::sink())?;
+                Ok(true)
+            })
+        })();
+        result.map_err(|error| {
+            UpdaterError::Archive {
+                path: archive.to_path_buf(),
+                message: format!("7z verification failed: {error}"),
             }
             .into()
         })

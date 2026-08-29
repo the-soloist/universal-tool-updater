@@ -32,6 +32,46 @@ fn state_version() -> u32 {
 pub struct ToolState {
     pub version: String,
     pub updated_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    archive: Option<ArchiveState>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct ArchiveState {
+    // 大小和精确修改时间构成轻量文件身份；归档写入状态前已完成完整内容校验。
+    size: u64,
+    modified_seconds: u64,
+    modified_nanoseconds: u32,
+}
+
+impl ArchiveState {
+    pub(crate) fn capture(path: &Path) -> Result<Self> {
+        let metadata = fs::symlink_metadata(path)
+            .with_context(|| format!("cannot inspect installed archive {}", path.display()))?;
+        if !metadata.file_type().is_file() {
+            anyhow::bail!("installed archive {} is not a regular file", path.display());
+        }
+        let modified = metadata
+            .modified()
+            .with_context(|| format!("cannot read modification time for {}", path.display()))?
+            .duration_since(UNIX_EPOCH)
+            .with_context(|| {
+                format!(
+                    "installed archive {} predates the Unix epoch",
+                    path.display()
+                )
+            })?;
+        Ok(Self {
+            size: metadata.len(),
+            modified_seconds: modified.as_secs(),
+            modified_nanoseconds: modified.subsec_nanos(),
+        })
+    }
+
+    pub(crate) fn matches(&self, path: &Path) -> bool {
+        // 归档写入状态前已经完整解码校验；后续用文件身份快速识别是否被替换或改写。
+        Self::capture(path).is_ok_and(|current| current == *self)
+    }
 }
 
 impl StateStore {
@@ -69,7 +109,23 @@ impl StateStore {
             .map(|entry| entry.version.as_str())
     }
 
+    pub(crate) fn archive(&self, tool_id: &str) -> Option<&ArchiveState> {
+        self.data
+            .tools
+            .get(tool_id)
+            .and_then(|entry| entry.archive.as_ref())
+    }
+
     pub fn record(&mut self, tool_id: &str, version: &str) -> Result<()> {
+        self.record_installation(tool_id, version, None)
+    }
+
+    pub(crate) fn record_installation(
+        &mut self,
+        tool_id: &str,
+        version: &str,
+        archive: Option<ArchiveState>,
+    ) -> Result<()> {
         let updated_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .context("system time is before Unix epoch")?
@@ -79,6 +135,7 @@ impl StateStore {
             ToolState {
                 version: version.to_owned(),
                 updated_at,
+                archive,
             },
         );
         // 持久化失败时恢复内存中的旧值，避免重试看到从未写入磁盘的更新。
@@ -88,6 +145,26 @@ impl StateStore {
             } else {
                 self.data.tools.remove(tool_id);
             }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn record_archive(&mut self, tool_id: &str, archive: ArchiveState) -> Result<()> {
+        let previous = {
+            let entry = self
+                .data
+                .tools
+                .get_mut(tool_id)
+                .with_context(|| format!("cannot find state for tool {tool_id}"))?;
+            entry.archive.replace(archive)
+        };
+        if let Err(error) = self.save() {
+            self.data
+                .tools
+                .get_mut(tool_id)
+                .expect("the state entry existed before persistence")
+                .archive = previous;
             return Err(error);
         }
         Ok(())
@@ -118,9 +195,11 @@ impl StateStore {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use tempfile::tempdir;
 
-    use super::StateStore;
+    use super::{ArchiveState, StateStore};
 
     #[test]
     fn persists_versions_atomically() {
@@ -149,5 +228,40 @@ mod tests {
         let reloaded = StateStore::load(path).unwrap();
         assert_eq!(reloaded.version("failed"), None);
         assert_eq!(reloaded.version("working"), Some("v2"));
+    }
+
+    #[test]
+    fn persists_the_verified_archive_identity() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("state.yaml");
+        let archive = directory.path().join("Demo.7z");
+        fs::write(&archive, "archive").unwrap();
+        let identity = ArchiveState::capture(&archive).unwrap();
+        let mut state = StateStore::load(&path).unwrap();
+        state
+            .record_installation("demo", "v1", Some(identity))
+            .unwrap();
+
+        let reloaded = StateStore::load(&path).unwrap();
+        assert!(reloaded.archive("demo").unwrap().matches(&archive));
+        fs::write(&archive, "changed archive").unwrap();
+        assert!(!reloaded.archive("demo").unwrap().matches(&archive));
+    }
+
+    #[test]
+    fn adds_an_archive_identity_without_changing_the_recorded_version() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("state.yaml");
+        let archive = directory.path().join("Demo.7z");
+        fs::write(&archive, "archive").unwrap();
+        let mut state = StateStore::load(&path).unwrap();
+        state.record("demo", "v1").unwrap();
+        state
+            .record_archive("demo", ArchiveState::capture(&archive).unwrap())
+            .unwrap();
+
+        let reloaded = StateStore::load(path).unwrap();
+        assert_eq!(reloaded.version("demo"), Some("v1"));
+        assert!(reloaded.archive("demo").unwrap().matches(&archive));
     }
 }
