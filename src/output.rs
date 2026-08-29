@@ -46,16 +46,14 @@ impl ProgressAwareWriter {
             .lock()
             .expect("progress output mutex poisoned")
             .clone();
-        if let Some(progress) = progress {
-            progress.suspend(|| {
-                let mut stderr = io::stderr().lock();
-                stderr.write_all(&buffer)?;
-                stderr.flush()
-            })
-        } else {
+        let write_stderr = || {
             let mut stderr = io::stderr().lock();
             stderr.write_all(&buffer)?;
             stderr.flush()
+        };
+        match progress {
+            Some(progress) => progress.suspend(write_stderr),
+            None => write_stderr(),
         }
     }
 }

@@ -90,15 +90,11 @@ pub(super) fn install(
     match spawn {
         Ok(mut child) => {
             if let Err(error) = wait_for_helper_ready(&mut child, &work_path) {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = fs::remove_dir_all(&work_path);
+                abort_helper(&mut child, &work_path);
                 return Err(error);
             }
             if let Err(error) = super::status::write_scheduled(target_parent, &version) {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = fs::remove_dir_all(&work_path);
+                abort_helper(&mut child, &work_path);
                 return Err(error);
             }
             // 辅助进程已发出就绪信号并等待此锁；先持久化已计划结果再释放，避免辅助进程继续执行时发生竞态。
@@ -108,9 +104,7 @@ pub(super) fn install(
                 {
                     tracing::error!(error = %status_error, "cannot persist failed self-update result");
                 }
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = fs::remove_dir_all(&work_path);
+                abort_helper(&mut child, &work_path);
                 return Err(error);
             }
             drop(child);
@@ -126,6 +120,13 @@ pub(super) fn install(
             })
         }
     }
+}
+
+#[cfg(windows)]
+fn abort_helper(child: &mut std::process::Child, work_dir: &Path) {
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = fs::remove_dir_all(work_dir);
 }
 
 #[cfg(windows)]

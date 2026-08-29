@@ -57,7 +57,7 @@ pub(super) fn send_with_retry(
         match response {
             Ok(response) => return Ok(response),
             Err(error) => {
-                let retry = attempt < ATTEMPTS && is_retryable(&error);
+                let retry = attempt < ATTEMPTS && is_retryable_status(error.status());
                 if retry {
                     tracing::warn!(
                         tool = %tool.id,
@@ -159,10 +159,6 @@ fn filename_from_content_disposition(value: &str) -> Option<String> {
         }
     }
     fallback
-}
-
-fn is_retryable(error: &reqwest::Error) -> bool {
-    is_retryable_status(error.status())
 }
 
 pub(super) fn is_retryable_status(status: Option<StatusCode>) -> bool {

@@ -174,57 +174,26 @@ impl ToolWorkspace {
     }
 
     pub(crate) fn clear_partials(&self) -> Result<()> {
-        match fs::symlink_metadata(&self.partials) {
-            Ok(metadata) if metadata.file_type().is_dir() => {
-                fs::remove_dir_all(&self.partials).with_context(|| {
-                    format!(
-                        "cannot clear partial download directory {}",
-                        self.partials.display()
-                    )
-                })?;
-            }
-            Ok(_) => anyhow::bail!(
-                "partial download path {} is not a directory",
-                self.partials.display()
-            ),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "cannot inspect partial download directory {}",
-                        self.partials.display()
-                    )
-                });
-            }
-        }
-        Ok(())
+        clear_directory(
+            &self.partials,
+            "partial download",
+            "partial download directory",
+        )
     }
 
     pub(crate) fn clear_downloads(&self) -> Result<()> {
-        match fs::symlink_metadata(&self.downloads) {
-            Ok(metadata) if metadata.file_type().is_dir() => {
-                fs::remove_dir_all(&self.downloads).with_context(|| {
-                    format!(
-                        "cannot clear completed download directory {}",
-                        self.downloads.display()
-                    )
-                })?;
-            }
-            Ok(_) => anyhow::bail!(
-                "download path {} is not a directory",
-                self.downloads.display()
-            ),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "cannot inspect completed download directory {}",
-                        self.downloads.display()
-                    )
-                });
-            }
-        }
-        Ok(())
+        clear_directory(&self.downloads, "download", "completed download directory")
+    }
+}
+
+fn clear_directory(path: &Path, path_label: &str, directory_label: &str) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() => fs::remove_dir_all(path)
+            .with_context(|| format!("cannot clear {directory_label} {}", path.display())),
+        Ok(_) => anyhow::bail!("{path_label} path {} is not a directory", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("cannot inspect {directory_label} {}", path.display())),
     }
 }
 
