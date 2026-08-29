@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tempfile::tempdir;
 
@@ -64,9 +64,12 @@ is_release = true
             .destination
             .ends_with("Tools/Toolkit/Tools/bat/release")
     );
-    let migrated = fs::read_to_string(output.join("tools.yaml")).unwrap();
-    assert!(migrated.contains("destination: Tools/bat"));
-    assert!(!migrated.contains("destination: Tools/bat/release"));
+    let migrated: crate::config::model::ToolFile =
+        yaml_serde::from_str(&fs::read_to_string(output.join("tools.yaml")).unwrap()).unwrap();
+    assert_eq!(
+        migrated.tools["bat"].install.destination,
+        PathBuf::from("Tools").join("bat")
+    );
 }
 
 #[test]
