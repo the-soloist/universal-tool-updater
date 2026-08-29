@@ -43,7 +43,7 @@ impl ProgressManager {
         let overall = if enabled {
             let bar = multi.add(ProgressBar::new(total as u64));
             bar.set_style(styles.overall.clone());
-            bar.set_message("updating tools");
+            bar.set_message(format!("updating tools ({total} total)"));
             bar
         } else {
             ProgressBar::hidden()
@@ -83,11 +83,12 @@ impl ProgressManager {
     }
 
     pub(crate) fn complete(&self, task: &TaskProgress) {
-        task.bar.finish_and_clear();
+        // 先移除任务，避免清理任务和更新总进度连续触发两次重绘。
         if self.enabled {
             self.multi.remove(&task.bar);
             self.overall.inc(1);
         }
+        task.bar.finish_and_clear();
     }
 
     pub(crate) fn finish(&self) {
