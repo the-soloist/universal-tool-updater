@@ -94,8 +94,10 @@ xxx(xxx): 中文标题
 
 本地验证按改动范围选择最小必要命令，不默认重复完整 CI 矩阵：
 
+- 本地验证命令默认在沙箱外执行；涉及本地监听端口、临时文件、网络请求或跨平台构建时，直接申请沙箱外权限，避免沙箱限制造成误判。
+- 仅修改注释、文档或格式时，不运行测试；只需运行 `git diff --check`，必要时检查对应文件格式。
 - 文档、脚本或 workflow 改动：运行 `git diff --check`，并对 YAML 或 shell 做语法检查。
-- Rust 代码改动：先运行 `cargo fmt -- --check`，再针对受影响的 crate/测试运行 Clippy 和测试。例如日志入口可运行 `cargo clippy --bin updater -- -D warnings` 与 `cargo test --bin updater logging::tests`；库模块可使用 `cargo clippy --lib --all-features -- -D warnings` 和 `cargo test --lib <测试过滤器>`。
+- Rust 行为代码改动：先运行 `cargo fmt -- --check`；涉及逻辑、接口、并发或平台分支时，针对受影响的 crate/测试运行 Clippy 和测试。例如日志入口可运行 `cargo clippy --bin updater -- -D warnings` 与 `cargo test --bin updater logging::tests`；库模块可使用 `cargo clippy --lib --all-features -- -D warnings` 和 `cargo test --lib <测试过滤器>`。仅注释或格式改动不运行 Clippy 和测试。
 - 构建目标或构建脚本改动：优先验证 macOS ARM64：
 
   ```bash
@@ -104,7 +106,7 @@ xxx(xxx): 中文标题
 
   Linux/Windows 其他目标由 CI 矩阵负责交叉构建验证。
 
-只有在修改跨模块公共行为、准备发布，或用户明确要求时，才在本地运行完整测试：
+只有用户明确要求时，才在本地运行完整测试：
 
 ```bash
 cargo test --all-targets --all-features
