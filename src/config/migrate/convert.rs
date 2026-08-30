@@ -164,6 +164,7 @@ fn hook(table: &toml::map::Map<String, Value>, field: &str, tool: &str) -> Resul
 }
 
 pub(super) fn normalize_destination(value: &str) -> PathBuf {
+    // 旧部署使用固定的 Unix 根路径；迁移已知根路径到可移植的工具包布局，其他用户路径保持不变。
     let normalized = value.replace('\\', "/");
     // String concatenation keeps the portable forward-slash form on Windows,
     // where PathBuf::join would re-serialize with a platform separator.

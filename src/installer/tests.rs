@@ -14,9 +14,9 @@ use crate::progress::ProgressManager;
 use crate::test_support::tool as test_tool;
 use crate::workspace::RunWorkspace;
 
-use super::Installer;
 use super::output::{effective_mode, managed_archive_path, managed_archive_pattern};
 use super::transaction::CommitSource;
+use super::{ExistingArchiveStatus, InstallOptions, Installer};
 
 #[test]
 fn cross_filesystem_fallback_copies_the_commit_source_next_to_the_destination() {
@@ -131,7 +131,7 @@ fn keeps_github_copy_artifacts_uncompressed_and_records_release_version() {
             ],
             &workspace,
             &task_progress,
-            1,
+            InstallOptions::new(1, ExistingArchiveStatus::Unchecked),
         )
         .unwrap();
 
@@ -164,6 +164,56 @@ fn keeps_github_copy_artifacts_uncompressed_and_records_release_version() {
             .unwrap()
             .join(".version.utu-backup")
             .exists()
+    );
+}
+
+#[test]
+fn rebuilds_an_unchecked_corrupt_merge_archive() {
+    let directory = tempdir().unwrap();
+    let toolkit = directory.path().join("Toolkit");
+    let downloads = directory.path().join("updates");
+    let destination = toolkit.join("Demo");
+    fs::create_dir_all(&destination).unwrap();
+    fs::create_dir_all(&downloads).unwrap();
+    fs::write(destination.join("Demo#v1.7z"), "corrupt archive").unwrap();
+
+    let payload = directory.path().join("payload");
+    let artifact = downloads.join("demo.7z");
+    fs::create_dir(&payload).unwrap();
+    fs::write(payload.join("new.bin"), "new").unwrap();
+    let archive_service = ArchiveService::default();
+    archive_service.compress_7z(&payload, &artifact).unwrap();
+
+    let mut tool = test_tool("demo", destination.clone());
+    tool.name = "Demo".to_owned();
+    tool.install.existing = ExistingPolicy::Merge;
+    tool.install.save = OutputMode::Archive;
+    tool.install.archive_name = "{name}#{version}.7z".to_owned();
+    let hook_runner = HookRunner::default();
+    let installer = Installer::new(&archive_service, &hook_runner, directory.path(), &toolkit);
+    let run = RunWorkspace::create(&downloads, &downloads.join("staging")).unwrap();
+    let workspace = run.prepare(&tool).unwrap();
+    let progress = ProgressManager::new(false, 1);
+    let task_progress = progress.task(&tool.profile, &tool.name);
+
+    installer
+        .install(
+            &tool,
+            "v2",
+            &[DownloadedArtifact { path: artifact }],
+            &workspace,
+            &task_progress,
+            InstallOptions::new(1, ExistingArchiveStatus::Unchecked),
+        )
+        .unwrap();
+
+    let archive = destination.join("Demo#v2.7z");
+    let extracted = directory.path().join("extracted");
+    assert!(!destination.join("Demo#v1.7z").exists());
+    archive_service.extract(&archive, &extracted, None).unwrap();
+    assert_eq!(
+        fs::read_to_string(extracted.join("new.bin")).unwrap(),
+        "new"
     );
 }
 
@@ -207,7 +257,7 @@ fn directory_output_records_version_inside_destination() {
             &[DownloadedArtifact { path: artifact }],
             &workspace,
             &task_progress,
-            1,
+            InstallOptions::new(1, ExistingArchiveStatus::Unchecked),
         )
         .unwrap();
 
@@ -271,7 +321,7 @@ fn restores_previous_installation_when_post_install_hook_fails() {
         &[DownloadedArtifact { path: artifact }],
         &workspace,
         &task_progress,
-        1,
+        InstallOptions::new(1, ExistingArchiveStatus::Unchecked),
     );
     assert!(result.is_err());
     assert_eq!(
@@ -338,7 +388,7 @@ fn merge_rollback_restores_the_original_file_content() {
         &[DownloadedArtifact { path: artifact }],
         &workspace,
         &task_progress,
-        1,
+        InstallOptions::new(1, ExistingArchiveStatus::Unchecked),
     );
     assert!(
         result.is_err(),

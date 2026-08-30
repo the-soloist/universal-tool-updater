@@ -15,7 +15,7 @@ use super::WORK_DIRECTORY_PREFIX;
 const HELPER_READY_FILENAME: &str = "helper.ready";
 
 pub(super) enum InstallOutcome {
-    #[cfg_attr(windows, allow(dead_code))]
+    #[cfg(unix)]
     Completed,
     #[cfg(windows)]
     Scheduled,
@@ -73,6 +73,7 @@ pub(super) fn install(
             helper.display()
         )
     })?;
+    // 辅助进程启动后接管该工作区；阻止 TempDir 在父进程退出时删除它，由辅助进程完成替换后清理。
     let work_path = work_dir.keep();
     let spawn = Command::new(&helper)
         .arg("__self-replace")
@@ -89,26 +90,21 @@ pub(super) fn install(
     match spawn {
         Ok(mut child) => {
             if let Err(error) = wait_for_helper_ready(&mut child, &work_path) {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = fs::remove_dir_all(&work_path);
+                abort_helper(&mut child, &work_path);
                 return Err(error);
             }
             if let Err(error) = super::status::write_scheduled(target_parent, &version) {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = fs::remove_dir_all(&work_path);
+                abort_helper(&mut child, &work_path);
                 return Err(error);
             }
+            // 辅助进程已发出就绪信号并等待此锁；先持久化已计划结果再释放，避免辅助进程继续执行时发生竞态。
             if let Err(error) = lock.release_for_handoff() {
                 if let Err(status_error) =
                     super::status::write_failure(target_parent, &version, format!("{error:#}"))
                 {
                     tracing::error!(error = %status_error, "cannot persist failed self-update result");
                 }
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = fs::remove_dir_all(&work_path);
+                abort_helper(&mut child, &work_path);
                 return Err(error);
             }
             drop(child);
@@ -124,6 +120,13 @@ pub(super) fn install(
             })
         }
     }
+}
+
+#[cfg(windows)]
+fn abort_helper(child: &mut std::process::Child, work_dir: &Path) {
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = fs::remove_dir_all(work_dir);
 }
 
 #[cfg(windows)]

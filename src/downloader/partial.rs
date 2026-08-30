@@ -31,6 +31,30 @@ pub(super) struct Metadata {
     /// before resuming, so locally tampered partials are discarded.
     pub(super) prefix_sha256: String,
     pub(super) prefix_len: u64,
+    /// Marks a transport-verified complete cache entry; only trustworthy when
+    /// `verified` is `Transport` and `prefix_len` equals `total`, so a
+    /// metadata write interrupted mid-download cannot masquerade as complete.
+    #[serde(default)]
+    pub(super) complete: bool,
+    #[serde(default)]
+    pub(super) verified: Verification,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum Verification {
+    #[default]
+    None,
+    Transport,
+}
+
+/// Result of validating a cached partial download for resumption: the checked
+/// metadata, the byte offset to resume from and a hasher covering exactly
+/// those bytes.
+pub(super) struct ResumeState {
+    pub(super) metadata: Option<Metadata>,
+    pub(super) downloaded: u64,
+    pub(super) hasher: Sha256,
 }
 
 impl Metadata {
@@ -90,7 +114,7 @@ pub(super) fn load(path: &Path, partial: &Path, url: &str) -> Result<Option<Meta
                 && safe_filename(&metadata.filename).as_deref()
                     == Some(metadata.filename.as_str()) =>
         {
-            verify_partial_prefix(path, partial, &metadata)
+            Ok(Some(metadata))
         }
         Ok(_) | Err(_) => {
             tracing::warn!(path = %path.display(), "discarding invalid partial download metadata");
@@ -100,30 +124,142 @@ pub(super) fn load(path: &Path, partial: &Path, url: &str) -> Result<Option<Meta
     }
 }
 
-/// Re-hashes the on-disk partial and compares it with the recorded digest;
-/// any length or content drift (tampering, truncation, crash mid-append)
-/// discards the partial so the download restarts from zero.
-fn verify_partial_prefix(
-    path: &Path,
+/// Validates the cached partial against its recorded prefix digest and
+/// prepares the resume state. The prefix is re-hashed and compared before
+/// anything is trusted, so tampered, truncated or mismatched caches are
+/// discarded. Bytes written past the last persisted checkpoint are truncated
+/// so the HTTP range and the digest resume from the same offset.
+pub(super) fn prepare_resume(
+    metadata_path: &Path,
     partial: &Path,
-    metadata: &Metadata,
-) -> Result<Option<Metadata>> {
-    let actual_len = fs::metadata(partial)
-        .map(|value| value.len())
-        .with_context(|| format!("cannot inspect partial download {}", partial.display()))?;
-    let intact = actual_len == metadata.prefix_len
-        && hash_prefix(partial, actual_len)?.eq_ignore_ascii_case(&metadata.prefix_sha256);
-    if !intact {
-        tracing::warn!(
-            partial = %partial.display(),
-            expected_len = metadata.prefix_len,
-            actual_len,
-            "partial download changed on disk since the last session; discarding it"
+    metadata: Option<Metadata>,
+) -> Result<ResumeState> {
+    let Some(metadata) = metadata else {
+        return Ok(empty_resume());
+    };
+    let file_length = fs::metadata(partial)
+        .with_context(|| format!("cannot inspect partial download {}", partial.display()))?
+        .len();
+    if metadata.total.is_some_and(|total| file_length > total) {
+        return discard_corrupt_cache(
+            metadata_path,
+            partial,
+            "cached file is larger than the recorded remote total",
         );
-        clear(path, partial)?;
-        return Ok(None);
     }
-    Ok(Some(metadata.clone()))
+    let checkpoint_length = metadata.prefix_len;
+    if checkpoint_length > file_length
+        || metadata
+            .total
+            .is_some_and(|total| checkpoint_length > total)
+    {
+        return discard_corrupt_cache(
+            metadata_path,
+            partial,
+            "SHA-256 checkpoint length is inconsistent with the cached file",
+        );
+    }
+    // 文件可能先写入字节、后持久化对应检查点；截去尾部未检查点数据，确保哈希和 HTTP 范围从同一偏移恢复。
+    if file_length > checkpoint_length {
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(partial)
+            .with_context(|| format!("cannot open partial download {}", partial.display()))?;
+        file.set_len(checkpoint_length).with_context(|| {
+            format!(
+                "cannot truncate uncheckpointed download tail in {}",
+                partial.display()
+            )
+        })?;
+        file.sync_all()
+            .with_context(|| format!("cannot sync partial download {}", partial.display()))?;
+        tracing::warn!(
+            path = %partial.display(),
+            discarded_bytes = file_length - checkpoint_length,
+            "discarded an uncheckpointed download tail after interruption"
+        );
+    }
+
+    let hasher = hash_prefix_state(partial, checkpoint_length)?;
+    if !hex_digest(&hasher.clone().finalize()).eq_ignore_ascii_case(&metadata.prefix_sha256) {
+        return discard_corrupt_cache(
+            metadata_path,
+            partial,
+            "cached file SHA-256 does not match its checkpoint",
+        );
+    }
+    // 只有最终长度检查点和传输校验都成立时才能信任完成标记，避免写元数据中断后误用半成品缓存。
+    if metadata.complete
+        && (metadata.verified != Verification::Transport
+            || metadata
+                .total
+                .is_some_and(|total| checkpoint_length != total))
+    {
+        return discard_corrupt_cache(
+            metadata_path,
+            partial,
+            "completed cache metadata is not transport-verified",
+        );
+    }
+    if !metadata.complete && metadata.verified != Verification::None {
+        return discard_corrupt_cache(
+            metadata_path,
+            partial,
+            "incomplete cache metadata has an invalid verification state",
+        );
+    }
+    Ok(ResumeState {
+        metadata: Some(metadata),
+        downloaded: checkpoint_length,
+        hasher,
+    })
+}
+
+/// Persists the in-flight prefix digest as the new checkpoint and returns the
+/// hex digest. `complete` marks a fully transferred and transport-verified
+/// body, making the cache reusable across runs until installation succeeds.
+pub(super) fn checkpoint(
+    path: &Path,
+    metadata: &mut Metadata,
+    prefix_len: u64,
+    hasher: &Sha256,
+    complete: bool,
+) -> Result<String> {
+    let digest = hex_digest(&hasher.clone().finalize());
+    metadata.schema_version = SCHEMA_VERSION;
+    metadata.prefix_len = prefix_len;
+    metadata.prefix_sha256 = digest.clone();
+    metadata.complete = complete;
+    metadata.verified = if complete {
+        Verification::Transport
+    } else {
+        Verification::None
+    };
+    save(path, metadata)?;
+    Ok(digest)
+}
+
+fn empty_resume() -> ResumeState {
+    ResumeState {
+        metadata: None,
+        downloaded: 0,
+        hasher: Sha256::new(),
+    }
+}
+
+fn discard_corrupt_cache(
+    metadata_path: &Path,
+    partial: &Path,
+    reason: &str,
+) -> Result<ResumeState> {
+    tracing::warn!(
+        metadata = %metadata_path.display(),
+        partial = %partial.display(),
+        reason,
+        "discarding corrupt partial download cache"
+    );
+    clear(metadata_path, partial)?;
+    Ok(empty_resume())
 }
 
 fn regular_file(path: &Path) -> Result<Option<bool>> {
@@ -173,8 +309,9 @@ pub(super) fn length(metadata: Option<&Metadata>, partial: &Path) -> Result<u64>
         .with_context(|| format!("cannot inspect partial download {}", partial.display()))
 }
 
-/// Hashes the first `len` bytes of `partial`; errors when the file is shorter.
-pub(super) fn hash_prefix(partial: &Path, len: u64) -> Result<String> {
+/// Hashes the first `len` bytes of `partial` and returns the live hasher
+/// state; errors when the file is shorter.
+pub(super) fn hash_prefix_state(partial: &Path, len: u64) -> Result<Sha256> {
     let file = fs::File::open(partial)
         .with_context(|| format!("cannot open partial download {}", partial.display()))?;
     let mut reader = BufReader::new(file);
@@ -195,7 +332,13 @@ pub(super) fn hash_prefix(partial: &Path, len: u64) -> Result<String> {
         hasher.update(&buffer[..take]);
         remaining -= take as u64;
     }
-    Ok(hex_digest(&hasher.finalize()))
+    Ok(hasher)
+}
+
+/// SHA-256 hex digest of the first `len` bytes of `partial`; errors when the
+/// file is shorter.
+pub(super) fn hash_prefix(partial: &Path, len: u64) -> Result<String> {
+    Ok(hex_digest(&hash_prefix_state(partial, len)?.finalize()))
 }
 
 /// SHA-256 of the empty byte string; the prefix digest of a fresh download.
@@ -352,24 +495,122 @@ pub(super) fn clear(metadata: &Path, partial: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use std::fs;
 
+    use sha2::{Digest, Sha256};
     use tempfile::tempdir;
 
-    use super::{Metadata, SCHEMA_VERSION, empty_prefix_sha256, load, save};
+    use super::{
+        Metadata, SCHEMA_VERSION, Verification, hash_prefix, load, paths, prepare_resume, save,
+    };
 
+    #[cfg(unix)]
+    use super::empty_prefix_sha256;
+
+    fn sha256(contents: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(contents);
+        let digest = hasher.finalize();
+        digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn metadata_for(partial: &std::path::Path, contents: &[u8]) -> Metadata {
+        Metadata {
+            schema_version: SCHEMA_VERSION,
+            filename: "tool.zip".to_owned(),
+            etag: Some("\"fixture-v1\"".to_owned()),
+            last_modified: None,
+            total: None,
+            prefix_sha256: hash_prefix(partial, contents.len() as u64).unwrap(),
+            prefix_len: contents.len() as u64,
+            complete: false,
+            verified: Verification::None,
+        }
+    }
+
+    #[test]
+    fn discards_a_cache_when_its_sha256_checkpoint_does_not_match() {
+        let directory = tempdir().unwrap();
+        let (partial, metadata_path) = paths(directory.path(), "https://example.test/tool.zip");
+        fs::write(&partial, "damaged").unwrap();
+        let mut metadata = metadata_for(&partial, b"damaged");
+        metadata.prefix_sha256 = "0".repeat(64);
+        save(&metadata_path, &metadata).unwrap();
+
+        let loaded = load(&metadata_path, &partial, "https://example.test/tool.zip").unwrap();
+        let resume = prepare_resume(&metadata_path, &partial, loaded).unwrap();
+
+        assert!(resume.metadata.is_none());
+        assert_eq!(resume.downloaded, 0);
+        assert!(!metadata_path.exists());
+        assert!(!partial.exists());
+    }
+
+    #[test]
+    fn truncates_bytes_after_the_last_sha256_checkpoint() {
+        let directory = tempdir().unwrap();
+        let (partial, metadata_path) = paths(directory.path(), "https://example.test/tool.zip");
+        fs::write(&partial, "hello uncheckpointed tail").unwrap();
+        let mut metadata = metadata_for(&partial, b"hello");
+        metadata.total = Some(64);
+        save(&metadata_path, &metadata).unwrap();
+
+        let loaded = load(&metadata_path, &partial, "https://example.test/tool.zip").unwrap();
+        let resume = prepare_resume(&metadata_path, &partial, loaded).unwrap();
+
+        assert_eq!(resume.downloaded, 5);
+        assert_eq!(fs::read(partial).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn refuses_a_completed_cache_that_was_never_transport_verified() {
+        let directory = tempdir().unwrap();
+        let (partial, metadata_path) = paths(directory.path(), "https://example.test/tool.zip");
+        fs::write(&partial, "hello").unwrap();
+        let mut metadata = metadata_for(&partial, b"hello");
+        metadata.total = Some(5);
+        metadata.complete = true;
+        save(&metadata_path, &metadata).unwrap();
+
+        let loaded = load(&metadata_path, &partial, "https://example.test/tool.zip").unwrap();
+        let resume = prepare_resume(&metadata_path, &partial, loaded).unwrap();
+
+        assert!(resume.metadata.is_none());
+        assert!(!metadata_path.exists());
+        assert!(!partial.exists());
+    }
+
+    #[test]
+    fn accepts_a_transport_verified_completed_cache() {
+        let directory = tempdir().unwrap();
+        let (partial, metadata_path) = paths(directory.path(), "https://example.test/tool.zip");
+        fs::write(&partial, "hello").unwrap();
+        let mut metadata = metadata_for(&partial, b"hello");
+        metadata.total = Some(5);
+        metadata.complete = true;
+        metadata.verified = Verification::Transport;
+        save(&metadata_path, &metadata).unwrap();
+
+        let loaded = load(&metadata_path, &partial, "https://example.test/tool.zip").unwrap();
+        let resume = prepare_resume(&metadata_path, &partial, loaded).unwrap();
+
+        assert_eq!(resume.downloaded, 5);
+        assert!(resume.metadata.is_some());
+        assert_eq!(sha256(b"hello").len(), 64);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn discards_symlinked_partial_files_without_touching_their_target() {
         let directory = tempdir().unwrap();
-        let metadata = directory.path().join("download.yaml");
-        let partial = directory.path().join("download.part");
+        let (partial, metadata_path) = paths(directory.path(), "https://example.test/tool.zip");
         let target = directory.path().join("target");
         fs::write(&target, "keep").unwrap();
         std::os::unix::fs::symlink(&target, &partial).unwrap();
         save(
-            &metadata,
+            &metadata_path,
             &Metadata {
                 schema_version: SCHEMA_VERSION,
                 filename: "tool.zip".to_owned(),
@@ -378,17 +619,19 @@ mod tests {
                 total: Some(4),
                 prefix_sha256: empty_prefix_sha256(),
                 prefix_len: 0,
+                complete: false,
+                verified: Verification::None,
             },
         )
         .unwrap();
 
         assert!(
-            load(&metadata, &partial, "https://example.test/tool.zip")
+            load(&metadata_path, &partial, "https://example.test/tool.zip")
                 .unwrap()
                 .is_none()
         );
         assert_eq!(fs::read_to_string(target).unwrap(), "keep");
-        assert!(!metadata.exists());
+        assert!(!metadata_path.exists());
         assert!(!partial.exists());
     }
 }
@@ -399,7 +642,10 @@ mod integrity_tests {
 
     use tempfile::tempdir;
 
-    use super::{Metadata, SCHEMA_VERSION, SessionLock, hash_prefix, load, paths, save};
+    use super::{
+        Metadata, SCHEMA_VERSION, SessionLock, Verification, hash_prefix, load, paths,
+        prepare_resume, save,
+    };
 
     fn cache_for(
         directory: &std::path::Path,
@@ -417,7 +663,15 @@ mod integrity_tests {
             total: Some(11),
             prefix_sha256: hash_prefix(partial, contents.len() as u64).unwrap(),
             prefix_len: contents.len() as u64,
+            complete: false,
+            verified: Verification::None,
         }
+    }
+
+    fn resume(directory: &std::path::Path, url: &str) -> super::ResumeState {
+        let (partial, metadata_path) = cache_for(directory, url);
+        let loaded = load(&metadata_path, &partial, url).unwrap();
+        prepare_resume(&metadata_path, &partial, loaded).unwrap()
     }
 
     #[test]
@@ -432,10 +686,9 @@ mod integrity_tests {
         contents[2] ^= 0x01;
         fs::write(&partial, &contents).unwrap();
 
+        let state = resume(directory.path(), "https://example.test/a");
         assert!(
-            load(&metadata_path, &partial, "https://example.test/a")
-                .unwrap()
-                .is_none(),
+            state.metadata.is_none(),
             "a tampered partial must not be resumed"
         );
         assert!(!partial.exists());
@@ -451,11 +704,8 @@ mod integrity_tests {
         save(&metadata_path, &metadata_for(&partial, original)).unwrap();
         fs::write(&partial, &original[..4]).unwrap();
 
-        assert!(
-            load(&metadata_path, &partial, "https://example.test/a")
-                .unwrap()
-                .is_none()
-        );
+        let state = resume(directory.path(), "https://example.test/a");
+        assert!(state.metadata.is_none());
         assert!(!partial.exists());
         assert!(!metadata_path.exists());
     }
@@ -487,10 +737,10 @@ mod integrity_tests {
         fs::write(&partial, b"hello ").unwrap();
         save(&metadata_path, &metadata_for(&partial, b"hello ")).unwrap();
 
-        let loaded = load(&metadata_path, &partial, "https://example.test/a")
-            .unwrap()
-            .expect("an intact partial must load");
+        let state = resume(directory.path(), "https://example.test/a");
+        let loaded = state.metadata.expect("an intact partial must load");
         assert_eq!(loaded.prefix_len, 6);
+        assert_eq!(state.downloaded, 6);
     }
 
     #[test]
@@ -527,7 +777,7 @@ mod integrity_tests {
         let lock = directory.path().join("lock");
         fs::write(&lock, format!("{}\n0\n", std::process::id())).unwrap();
         let stale = std::time::SystemTime::now() - std::time::Duration::from_secs(25 * 60 * 60);
-        let file = fs::File::options().write(true).open(&lock).unwrap();
+        let file = std::fs::File::options().write(true).open(&lock).unwrap();
         file.set_modified(stale).unwrap();
         drop(file);
 

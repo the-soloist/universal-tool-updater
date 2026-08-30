@@ -19,6 +19,7 @@ pub(super) struct InstallationTransaction {
 
 impl InstallationTransaction {
     pub(super) fn begin(destination: &Path, version: Option<&Path>) -> Result<Self> {
+        // 遗留备份说明上次进程在事务中途停止；先恢复它再创建新备份，确保本次安装从一致状态开始。
         recover_interrupted_installation(destination, version)?;
         let destination = Backup::take(destination)?;
         let version = match version.map(Backup::take).transpose() {

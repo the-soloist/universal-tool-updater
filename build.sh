@@ -5,19 +5,20 @@ project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$project_root"
 
 target="${CARGO_BUILD_TARGET:-}"
-macos_universal=false
 
 usage() {
     cat <<'EOF'
-Usage: ./build.sh [--target <target-triple> | --macos-universal]
+Usage: ./build.sh [--target <target-triple>]
 
 Builds the stripped release binary using Cargo.lock.
 
 Examples:
   ./build.sh
-  ./build.sh --macos-universal
   ./build.sh --target x86_64-unknown-linux-musl
-  ./build.sh --target x86_64-pc-windows-msvc
+  ./build.sh --target aarch64-unknown-linux-musl
+  ./build.sh --target x86_64-pc-windows-gnu
+  ./build.sh --target aarch64-pc-windows-msvc
+  ./build.sh --target x86_64-apple-darwin
 EOF
 }
 
@@ -30,10 +31,6 @@ while (($# > 0)); do
             fi
             target="$2"
             shift 2
-            ;;
-        --macos-universal)
-            macos_universal=true
-            shift
             ;;
         -h | --help)
             usage
@@ -56,41 +53,6 @@ describe_binary() {
     fi
 }
 
-if [[ "$macos_universal" == true ]]; then
-    if [[ -n "$target" ]]; then
-        echo "error: --target and --macos-universal cannot be used together" >&2
-        exit 2
-    fi
-    if [[ "$(uname -s)" != "Darwin" ]]; then
-        echo "error: universal macOS binaries must be built on macOS" >&2
-        exit 1
-    fi
-    if ! command -v lipo >/dev/null 2>&1; then
-        echo "error: lipo is required; install the Xcode command-line tools" >&2
-        exit 1
-    fi
-
-    macos_targets=(aarch64-apple-darwin x86_64-apple-darwin)
-    for macos_target in "${macos_targets[@]}"; do
-        if ! rustup target list --installed | grep -qx "$macos_target"; then
-            echo "error: missing Rust target $macos_target" >&2
-            echo "install it with: rustup target add $macos_target" >&2
-            exit 1
-        fi
-        cargo build --locked --release --target "$macos_target"
-    done
-
-    universal_dir="target/universal-apple-darwin/release"
-    mkdir -p "$universal_dir"
-    universal_binary="$universal_dir/updater"
-    lipo -create \
-        "target/aarch64-apple-darwin/release/updater" \
-        "target/x86_64-apple-darwin/release/updater" \
-        -output "$universal_binary"
-    describe_binary "$universal_binary"
-    exit 0
-fi
-
 cargo_command=(cargo build)
 cargo_args=(--locked --release)
 artifact_dir="target/release"
@@ -98,11 +60,17 @@ if [[ -n "$target" ]]; then
     cargo_args+=(--target "$target")
     artifact_dir="target/$target/release"
 fi
-if [[ "$target" == *linux* && "$(uname -s)" != "Linux" ]]; then
+host_os="$(uname -s)"
+host_is_windows=false
+if [[ "${OS:-}" == "Windows_NT" || "$host_os" == MINGW* || "$host_os" == MSYS* || "$host_os" == CYGWIN* ]]; then
+    host_is_windows=true
+fi
+
+if [[ "$target" == "aarch64-unknown-linux-musl" || ("$target" == *linux* && "$host_os" != "Linux") || ("$target" == *windows-gnu && "$host_is_windows" != true) ]]; then
     if command -v cargo-zigbuild >/dev/null 2>&1; then
         cargo_command=(cargo zigbuild)
     else
-        echo "error: cross-compiling Linux from this host requires cargo-zigbuild and Zig" >&2
+        echo "error: this cross-compilation target requires cargo-zigbuild and Zig" >&2
         echo "install it with: cargo install cargo-zigbuild --locked" >&2
         exit 1
     fi

@@ -6,25 +6,25 @@ use regex::Regex;
 
 use crate::domain::{OutputMode, Tool, effective_output_mode as resolve_output_mode};
 use crate::error::UpdaterError;
+use crate::state::ArchiveState;
 
 pub(super) fn effective_mode(tool: &Tool) -> OutputMode {
     resolve_output_mode(tool.install.input, tool.install.save, &tool.artifacts)
 }
 
-pub(crate) fn installation_matches(tool: &Tool, version: &str) -> bool {
+pub(crate) fn installation_matches(
+    tool: &Tool,
+    version: &str,
+    archive: Option<&ArchiveState>,
+) -> bool {
     if !tool.install.destination.is_dir() {
         return false;
     }
     if effective_mode(tool) == OutputMode::Archive {
-        return tool
-            .install
-            .destination
-            .join(render_archive_name(
-                &tool.install.archive_name,
-                tool,
-                version,
-            ))
-            .is_file();
+        // 归档没有独立版本标记，必须确认已记录的文件身份仍与磁盘内容一致。
+        let path = installed_archive_path(tool, version)
+            .expect("archive output always has an installed archive path");
+        return archive.is_some_and(|archive| archive.matches(&path));
     }
 
     let marker = tool
@@ -32,6 +32,22 @@ pub(crate) fn installation_matches(tool: &Tool, version: &str) -> bool {
         .expect("directory output always has a version marker");
     fs::read_to_string(marker)
         .is_ok_and(|recorded| recorded.trim_end_matches(['\r', '\n']) == version)
+}
+
+pub(crate) fn installed_archive_state(tool: &Tool, version: &str) -> Result<Option<ArchiveState>> {
+    installed_archive_path(tool, version)
+        .map(|path| ArchiveState::capture(&path))
+        .transpose()
+}
+
+pub(crate) fn installed_archive_path(tool: &Tool, version: &str) -> Option<PathBuf> {
+    (effective_mode(tool) == OutputMode::Archive).then(|| {
+        tool.install.destination.join(render_archive_name(
+            &tool.install.archive_name,
+            tool,
+            version,
+        ))
+    })
 }
 
 pub(super) fn render_archive_name(template: &str, tool: &Tool, version: &str) -> String {
@@ -105,6 +121,8 @@ mod tests {
     use crate::domain::{InputMode, OutputMode};
     use crate::test_support::tool as test_tool;
 
+    use crate::state::ArchiveState;
+
     use super::installation_matches;
 
     #[test]
@@ -112,28 +130,28 @@ mod tests {
         let directory = tempdir().unwrap();
         let mut extracted = test_tool("extracted", directory.path().join("extracted"));
         fs::create_dir(&extracted.install.destination).unwrap();
-        assert!(!installation_matches(&extracted, "v1"));
+        assert!(!installation_matches(&extracted, "v1", None));
         fs::write(extracted.install.destination.join(".version"), "v1\n").unwrap();
-        assert!(installation_matches(&extracted, "v1"));
-        assert!(!installation_matches(&extracted, "v2"));
+        assert!(installation_matches(&extracted, "v1", None));
+        assert!(!installation_matches(&extracted, "v2", None));
 
         let copy_root = directory.path().join("copied");
         let mut copied = test_tool("copied", copy_root.join("release"));
         copied.install.input = InputMode::Copy;
         fs::create_dir_all(&copied.install.destination).unwrap();
         fs::write(copy_root.join(".version"), "v1\n").unwrap();
-        assert!(installation_matches(&copied, "v1"));
+        assert!(installation_matches(&copied, "v1", None));
 
         extracted.install.save = OutputMode::Archive;
         extracted.install.archive_name = "{id}#{version}.7z".to_owned();
         fs::remove_file(extracted.install.destination.join(".version")).unwrap();
-        assert!(!installation_matches(&extracted, "v1"));
-        fs::write(
-            extracted.install.destination.join("extracted#v1.7z"),
-            "archive",
-        )
-        .unwrap();
-        assert!(installation_matches(&extracted, "v1"));
-        assert!(!installation_matches(&extracted, "v2"));
+        assert!(!installation_matches(&extracted, "v1", None));
+        let archive = extracted.install.destination.join("extracted#v1.7z");
+        fs::write(&archive, "archive").unwrap();
+        let state = ArchiveState::capture(&archive).unwrap();
+        assert!(installation_matches(&extracted, "v1", Some(&state)));
+        assert!(!installation_matches(&extracted, "v2", Some(&state)));
+        fs::write(&archive, "changed archive").unwrap();
+        assert!(!installation_matches(&extracted, "v1", Some(&state)));
     }
 }

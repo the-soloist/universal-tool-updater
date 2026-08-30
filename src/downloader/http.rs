@@ -55,7 +55,7 @@ pub(super) fn send_with_retry(
         match response {
             Ok(response) => return Ok(response),
             Err(error) => {
-                let retry = attempt < ATTEMPTS && is_retryable(&error);
+                let retry = attempt < ATTEMPTS && is_retryable_status(error.status());
                 if retry {
                     tracing::warn!(
                         tool = %tool.id,
@@ -92,6 +92,7 @@ pub(super) fn response_header(response: &Response, name: &HeaderName) -> Option<
 }
 
 pub(super) fn validator_unchanged(response: &Response, expected: Option<&str>) -> bool {
+    // 部分服务器的范围响应不带校验标识；若返回标识，则必须与已保存的值一致。
     let Some(expected) = expected else {
         return true;
     };
@@ -156,10 +157,6 @@ fn filename_from_content_disposition(value: &str) -> Option<String> {
         }
     }
     fallback
-}
-
-fn is_retryable(error: &reqwest::Error) -> bool {
-    is_retryable_status(error.status())
 }
 
 #[cfg(test)]

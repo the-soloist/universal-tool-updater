@@ -10,6 +10,7 @@ use reqwest::blocking::Client;
 use sha2::{Digest, Sha256};
 use tempfile::{TempDir, tempdir};
 
+use crate::archive::Limits;
 use crate::config::model::{ArtifactConfig, InputMode, ReleaseConfig};
 use crate::domain::{DownloadedArtifact, ResolvedArtifact, Tool};
 use crate::progress::ProgressManager;
@@ -17,8 +18,8 @@ use crate::test_support::tool as test_tool;
 use crate::workspace::{RunWorkspace, ToolWorkspace};
 
 use super::partial::{
-    Metadata as PartialMetadata, SCHEMA_VERSION as PARTIAL_SCHEMA_VERSION, hash_prefix,
-    paths as partial_paths, save as save_partial_metadata,
+    Metadata as PartialMetadata, SCHEMA_VERSION as PARTIAL_SCHEMA_VERSION, Verification,
+    hash_prefix, paths as partial_paths, save as save_partial_metadata,
 };
 use super::transfer::is_retryable_status;
 use super::{DownloadCompletion, Downloader};
@@ -49,7 +50,54 @@ fn resumes_a_partial_download_from_a_previous_run() {
     server.join().unwrap();
 
     assert_eq!(fs::read(downloaded.path).unwrap(), body);
+    fixture.assert_cached(&url, body);
+    fixture.workspace.clear_partials().unwrap();
     fixture.assert_partials_empty();
+}
+
+#[test]
+fn restarts_when_a_schema_v2_cache_fails_sha256_validation() {
+    let body = b"hello world";
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/artifact.bin", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let size = stream.read(&mut request).unwrap();
+        let request = String::from_utf8_lossy(&request[..size]).to_ascii_lowercase();
+        assert!(!request.contains("range:"));
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: 11\r\nETag: \"current-v1\"\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        stream.write_all(body).unwrap();
+    });
+
+    let fixture = DownloadFixture::new();
+    let (partial, metadata) = partial_paths(fixture.workspace.partials(), &url);
+    fs::write(&partial, &body[..6]).unwrap();
+    save_partial_metadata(
+        &metadata,
+        &PartialMetadata {
+            schema_version: PARTIAL_SCHEMA_VERSION,
+            filename: "artifact.bin".to_owned(),
+            etag: Some("\"stale-v1\"".to_owned()),
+            last_modified: None,
+            total: Some(body.len() as u64),
+            prefix_sha256: "0".repeat(64),
+            prefix_len: 6,
+            complete: false,
+            verified: Verification::None,
+        },
+    )
+    .unwrap();
+
+    let downloaded = fixture.download(&url);
+    server.join().unwrap();
+
+    assert_eq!(fs::read(downloaded.path).unwrap(), body);
+    fixture.assert_cached(&url, body);
 }
 
 #[test]
@@ -89,7 +137,7 @@ fn resumes_after_the_response_body_is_interrupted() {
     server.join().unwrap();
 
     assert_eq!(fs::read(downloaded.path).unwrap(), body);
-    fixture.assert_partials_empty();
+    fixture.assert_cached(&url, body);
 }
 
 #[test]
@@ -126,7 +174,7 @@ fn downloads_more_partial_content_chunks_than_the_retry_limit() {
     server.join().unwrap();
 
     assert_eq!(fs::read(downloaded.path).unwrap(), body);
-    fixture.assert_partials_empty();
+    fixture.assert_cached(&url, body);
 }
 
 #[test]
@@ -156,7 +204,133 @@ fn revalidates_a_complete_partial_before_using_it() {
     server.join().unwrap();
 
     assert_eq!(fs::read(downloaded.path).unwrap(), current);
-    fixture.assert_partials_empty();
+    fixture.assert_cached(&url, current);
+}
+
+#[test]
+fn recovers_a_completed_artifact_from_an_interrupted_run() {
+    let body = b"hello world";
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/artifact.bin", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let size = stream.read(&mut request).unwrap();
+        let request = String::from_utf8_lossy(&request[..size]).to_ascii_lowercase();
+        assert!(request.contains("range: bytes=11-"));
+        assert!(!request.contains("if-range:"));
+        write!(
+            stream,
+            "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */11\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+    });
+
+    let root = tempdir().unwrap();
+    let staging = root.path().join("staging");
+    let tool = resume_tool();
+    let previous_run = RunWorkspace::create(root.path(), &staging).unwrap();
+    let previous = previous_run.prepare(&tool).unwrap();
+    fs::write(previous.downloads().join("artifact-1.0.0.bin"), body).unwrap();
+
+    let current_run = RunWorkspace::create(root.path(), &staging).unwrap();
+    let current = current_run.prepare(&tool).unwrap();
+    let (short_partial, short_metadata) = partial_paths(current.partials(), &url);
+    fs::write(&short_partial, &body[..5]).unwrap();
+    save_partial_metadata(
+        &short_metadata,
+        &PartialMetadata {
+            schema_version: PARTIAL_SCHEMA_VERSION,
+            filename: "artifact-1.0.0.bin".to_owned(),
+            etag: Some("\"partial-v1\"".to_owned()),
+            last_modified: None,
+            total: Some(body.len() as u64),
+            prefix_sha256: hash_prefix(&short_partial, 5).unwrap(),
+            prefix_len: 5,
+            complete: false,
+            verified: Verification::None,
+        },
+    )
+    .unwrap();
+    let client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let progress = ProgressManager::new(false, 1);
+    let task_progress = progress.task("test", "Resume");
+    let downloaded = Downloader::new(client, Limits::default())
+        .download(
+            &tool,
+            "1.0.0",
+            &ResolvedArtifact {
+                url: url.clone(),
+                filename: Some("artifact-1.0.0.bin".to_owned()),
+                expected_sha256: None,
+            },
+            &current,
+            (0, 1),
+            &task_progress,
+        )
+        .unwrap();
+    server.join().unwrap();
+
+    assert_eq!(fs::read(downloaded.path).unwrap(), body);
+    let (partial, metadata) = partial_paths(current.partials(), &url);
+    assert_eq!(fs::read(partial).unwrap(), body);
+    assert!(metadata.is_file());
+}
+
+#[test]
+fn does_not_recover_an_unversioned_artifact_from_an_old_run() {
+    let current_body = b"current";
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/artifact.bin", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let size = stream.read(&mut request).unwrap();
+        let request = String::from_utf8_lossy(&request[..size]).to_ascii_lowercase();
+        assert!(!request.contains("range:"));
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        stream.write_all(current_body).unwrap();
+    });
+
+    let root = tempdir().unwrap();
+    let staging = root.path().join("staging");
+    let tool = resume_tool();
+    let previous_run = RunWorkspace::create(root.path(), &staging).unwrap();
+    let previous = previous_run.prepare(&tool).unwrap();
+    fs::write(previous.downloads().join("artifact.bin"), "obsolete").unwrap();
+
+    let current_run = RunWorkspace::create(root.path(), &staging).unwrap();
+    let current = current_run.prepare(&tool).unwrap();
+    let client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let progress = ProgressManager::new(false, 1);
+    let task_progress = progress.task("test", "Resume");
+    let downloaded = Downloader::new(client, Limits::default())
+        .download(
+            &tool,
+            "opaque-version",
+            &ResolvedArtifact {
+                url,
+                filename: Some("artifact.bin".to_owned()),
+                expected_sha256: None,
+            },
+            &current,
+            (0, 1),
+            &task_progress,
+        )
+        .unwrap();
+    server.join().unwrap();
+
+    assert_eq!(fs::read(downloaded.path).unwrap(), current_body);
 }
 
 #[test]
@@ -200,7 +374,7 @@ fn restarts_when_a_416_response_carries_no_validator() {
     server.join().unwrap();
 
     assert_eq!(fs::read(downloaded.path).unwrap(), body);
-    fixture.assert_partials_empty();
+    fixture.assert_cached(&url, body);
 }
 
 #[test]
@@ -236,7 +410,7 @@ fn discards_a_tampered_partial_and_restarts_from_zero() {
     server.join().unwrap();
 
     assert_eq!(fs::read(downloaded.path).unwrap(), body);
-    fixture.assert_partials_empty();
+    fixture.assert_cached(&url, body);
 }
 
 #[test]
@@ -332,21 +506,21 @@ fn rejects_chunked_responses_that_exceed_the_download_ceiling() {
     let task_progress = progress.task("test", "Limit");
     let error = Downloader::new(
         client,
-        crate::archive::Limits {
+        Limits {
             max_total_bytes: 64,
             max_entries: 1,
         },
     )
     .download(
         &fixture.tool,
+        "1.0.0",
         &ResolvedArtifact {
             url: url.clone(),
             filename: Some("artifact.bin".to_owned()),
             expected_sha256: None,
         },
         &fixture.workspace,
-        0,
-        1,
+        (0, 1),
         &task_progress,
     )
     .unwrap_err();
@@ -424,7 +598,7 @@ fn verifies_the_expected_sha256_digest_after_downloading() {
     server.join().unwrap();
 
     assert_eq!(fs::read(downloaded.path).unwrap(), body);
-    fixture.assert_partials_empty();
+    fixture.assert_cached(&url, body);
 }
 
 /// An interrupted body that retries and resumes must still verify against
@@ -474,7 +648,7 @@ fn verifies_the_sha256_digest_after_an_interrupted_transfer_resumes() {
     server.join().unwrap();
 
     assert_eq!(fs::read(downloaded.path).unwrap(), body);
-    fixture.assert_partials_empty();
+    fixture.assert_cached(&url, &body);
 }
 
 fn pseudo_random_body(len: usize) -> Vec<u8> {
@@ -560,6 +734,8 @@ impl DownloadFixture {
                 total,
                 prefix_sha256: hash_prefix(&partial, contents.len() as u64).unwrap(),
                 prefix_len: contents.len() as u64,
+                complete: false,
+                verified: Verification::None,
             },
         )
         .unwrap();
@@ -580,26 +756,37 @@ impl DownloadFixture {
             .unwrap();
         let progress = ProgressManager::new(false, 1);
         let task_progress = progress.task("test", "Resume");
-        Downloader::new(client, crate::archive::Limits::default()).download(
+        Downloader::new(client, Limits::default()).download(
             &self.tool,
+            "1.0.0",
             &ResolvedArtifact {
                 url: url.to_owned(),
                 filename: Some("artifact.bin".to_owned()),
                 expected_sha256,
             },
             &self.workspace,
-            0,
-            1,
+            (0, 1),
             &task_progress,
         )
     }
 
     fn assert_partials_empty(&self) {
-        assert!(
-            fs::read_dir(self.workspace.partials())
-                .unwrap()
-                .next()
-                .is_none()
-        );
+        match fs::read_dir(self.workspace.partials()) {
+            Ok(mut entries) => assert!(entries.next().is_none()),
+            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
+        }
+    }
+
+    fn assert_cached(&self, url: &str, contents: &[u8]) {
+        let (partial, metadata) = partial_paths(self.workspace.partials(), url);
+        assert_eq!(fs::read(partial).unwrap(), contents);
+        let encoded = fs::read_to_string(metadata).unwrap();
+        let metadata: PartialMetadata = yaml_serde::from_str(&encoded).unwrap();
+        assert_eq!(metadata.schema_version, PARTIAL_SCHEMA_VERSION);
+        assert_eq!(metadata.prefix_len, contents.len() as u64);
+        assert_eq!(metadata.total, Some(contents.len() as u64));
+        assert_eq!(metadata.prefix_sha256, hex_sha256(contents));
+        assert!(metadata.complete);
+        assert_eq!(metadata.verified, Verification::Transport);
     }
 }

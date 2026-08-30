@@ -1,8 +1,8 @@
 # Profile 文件示例。
 #
 # 使用方式：
-#   1. 将本文件复制到 profiles/<profile-name>.yaml。
-#   2. 在 profiles/manifest.yaml 的 include 中加入该文件名。
+#   1. 将本文件和 examples/manifest.yaml 复制到 profiles 目录。
+#   2. 按需重命名 profile，并同步修改 manifest.yaml 的 include。
 #   3. 修改工具 ID、下载规则和安装目录，并把 enabled 改为 true。
 #
 # 工具 ID 必须使用小写 kebab-case。示例工具默认禁用，避免误下载。

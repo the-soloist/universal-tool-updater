@@ -13,6 +13,7 @@ const WIDTH_PROBE_INTERVAL: u32 = 64;
 pub(crate) struct ProgressManager {
     multi: MultiProgress,
     overall: ProgressBar,
+    task_bars: Vec<ProgressBar>,
     styles: ProgressStyles,
     enabled: bool,
 }
@@ -39,36 +40,71 @@ struct ProgressStyles {
 }
 
 impl ProgressManager {
+    #[cfg(test)]
     pub(crate) fn new(requested: bool, total: usize) -> Self {
+        Self::new_with_workers(requested, total, 1)
+    }
+
+    pub(crate) fn new_with_workers(requested: bool, total: usize, workers: usize) -> Self {
         let terminal = Term::stderr();
         let enabled = requested && terminal.is_term();
         let width = terminal.size().1 as usize;
         let styles = styles_for_width(width);
         let multi = MultiProgress::new();
+        if enabled {
+            // 固定任务行数量后，使用光标移动覆盖上一帧，避免终端保留历史重绘内容。
+            multi.set_move_cursor(true);
+        }
         let overall = if enabled {
             let bar = multi.add(ProgressBar::new(total as u64));
             bar.set_style(styles.overall.clone());
-            bar.set_message("updating tools");
+            bar.set_message(format!("updating tools ({total} total)"));
             bar
         } else {
             ProgressBar::hidden()
         };
+        let task_bars = if enabled {
+            (0..workers.max(1))
+                .map(|_| {
+                    let bar = multi.add(ProgressBar::new_spinner());
+                    bar.set_style(styles.spinner.clone());
+                    bar.enable_steady_tick(Duration::from_millis(100));
+                    bar
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if enabled {
+            crate::output::activate_progress(&multi);
+        }
         Self {
             multi,
             overall,
+            task_bars,
             styles,
             enabled,
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn task(&self, profile: &str, name: &str) -> TaskProgress {
+        self.task_in_slot(0, profile, name)
+    }
+
+    pub(crate) fn task_in_slot(&self, slot: usize, profile: &str, name: &str) -> TaskProgress {
         let prefix = task_prefix(profile, name, current_terminal_width());
         let prefix_width = display_width(&prefix);
         let bar = if self.enabled {
-            let bar = self.multi.add(ProgressBar::new_spinner());
+            let bar = self
+                .task_bars
+                .get(slot)
+                .cloned()
+                .unwrap_or_else(ProgressBar::hidden);
+            bar.reset();
             bar.set_style(self.styles.spinner.clone());
             bar.set_prefix(prefix);
-            bar.enable_steady_tick(Duration::from_millis(100));
+            bar.set_message(String::new());
             bar
         } else {
             ProgressBar::hidden()
@@ -88,10 +124,8 @@ impl ProgressManager {
         }
     }
 
-    pub(crate) fn complete(&self, task: &TaskProgress) {
-        task.bar.finish_and_clear();
+    pub(crate) fn complete(&self) {
         if self.enabled {
-            self.multi.remove(&task.bar);
             self.overall.inc(1);
         }
     }
@@ -99,9 +133,15 @@ impl ProgressManager {
     pub(crate) fn finish(&self) {
         self.overall.finish_and_clear();
         if self.enabled {
-            self.multi.remove(&self.overall);
             let _ = self.multi.clear();
         }
+        crate::output::deactivate_progress();
+    }
+}
+
+impl Drop for ProgressManager {
+    fn drop(&mut self) {
+        crate::output::deactivate_progress();
     }
 }
 
@@ -211,18 +251,15 @@ fn download_style(width: usize, prefix_width: usize, label_width: usize) -> Prog
         style(&format!(
             "{{prefix:.cyan}} {{msg:{message_width}!}} [{{bar:{bar_width}.green/black}}] {{bytes}}/{{total_bytes}} {{eta}}"
         ))
-        .progress_chars("=>-")
     } else {
         let usable = width.saturating_sub(prefix_width + 9);
         if usable < 16 {
-            return style("{prefix:.cyan} [{wide_bar:.green/black}] {percent:>3}%")
-                .progress_chars("=>-");
+            return style("{prefix:.cyan} [{wide_bar:.green/black}] {percent:>3}%");
         }
         let (message_width, bar_width) = split_download_width(usable, label_width, 8);
         style(&format!(
             "{{prefix:.cyan}} {{msg:{message_width}!}} [{{bar:{bar_width}.green/black}}] {{percent:>3}}%"
         ))
-        .progress_chars("=>-")
     }
 }
 
@@ -277,7 +314,9 @@ fn width_probe_due(checks: &Cell<u32>) -> bool {
 }
 
 fn style(template: &str) -> ProgressStyle {
-    ProgressStyle::with_template(template).expect("static progress template")
+    ProgressStyle::with_template(template)
+        .expect("static progress template")
+        .progress_chars("=>-")
 }
 
 #[cfg(test)]

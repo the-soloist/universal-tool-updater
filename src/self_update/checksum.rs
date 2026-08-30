@@ -66,14 +66,14 @@ mod tests {
     #[test]
     fn selects_an_exact_checksum_entry() {
         let sums = concat!(
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  updater-v1.0.0-linux.7z\n",
-            "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB *updater-v1.0.0-windows.7z\n",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  updater-v1.0.0-linux-arm64.7z\n",
+            "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB *updater-v1.0.0-windows-arm64.7z\n",
         );
         assert_eq!(
-            expected_sha256(sums, "updater-v1.0.0-windows.7z").unwrap(),
+            expected_sha256(sums, "updater-v1.0.0-windows-arm64.7z").unwrap(),
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         );
-        assert!(expected_sha256(sums, "updater-v1.0.0-macos.7z").is_err());
+        assert!(expected_sha256(sums, "updater-v1.0.0-macos-arm64.7z").is_err());
     }
 
     #[test]

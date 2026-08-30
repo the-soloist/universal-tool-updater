@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
+use universal_tool_updater::output::ProgressAwareMakeWriter;
 
 pub(crate) fn init(verbose: bool, requested_directory: Option<&Path>) -> Result<PathBuf> {
     let directory = log_directory(requested_directory)?;
@@ -20,6 +21,7 @@ pub(crate) fn init(verbose: bool, requested_directory: Option<&Path>) -> Result<
         .without_time()
         .with_target(false)
         .compact()
+        .with_writer(ProgressAwareMakeWriter)
         .with_filter(terminal_filter);
     let run_log = tracing_subscriber::fmt::layer()
         .with_ansi(false)
@@ -99,6 +101,12 @@ fn prune_old_logs(directory: &Path, keep: usize) {
     }
 }
 
+pub(crate) fn display_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "<unknown>".to_owned())
+}
+
 fn log_directory(requested: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = requested {
         return if path.is_absolute() {
@@ -136,7 +144,15 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{create_run_log, log_directory, prune_old_logs};
+    use super::{create_run_log, display_name, log_directory, prune_old_logs};
+
+    #[test]
+    fn displays_only_the_path_filename() {
+        assert_eq!(
+            display_name(Path::new("/tmp/updater/updater-run.log")),
+            "updater-run.log"
+        );
+    }
 
     #[test]
     fn resolves_relative_log_directories_from_the_working_directory() {

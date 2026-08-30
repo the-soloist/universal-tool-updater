@@ -96,7 +96,7 @@ defaults:
 
 所有路径都不能为空。绝对路径直接使用；`~` 和 `~/...` 会展开到当前用户主目录。
 
-`downloads` 用于下载文件和断点续传分片，`staging` 用于合并、压缩和安装事务。`staging` 不能与 `state` 重叠。工具安装路径、版本文件和符号链接目标也不能与 `downloads`、`staging`、`state` 重叠。
+`downloads` 用于本次下载文件、断点续传分片及等待工具整体安装成功的完整产物；工具安装成功后会立即删除该工具对应的完整下载文件和 partial 缓存，安装失败或运行中断时则保留，以便下次运行校验并复用。断点缓存的 schema v2 元数据包含已确认字节数和 SHA-256；续传前会重新计算分片哈希，损坏缓存会被丢弃。`verified: transport` 仅表示 HTTP 传输完整。`staging` 用于合并、压缩和安装事务。`staging` 不能与 `state` 重叠。工具安装路径、版本文件和符号链接目标也不能与 `downloads`、`staging`、`state` 重叠。
 
 ### 2.3 network
 
@@ -564,7 +564,7 @@ hooks:
 
 ## 9. 完整示例
 
-可以直接复制并修改的完整 profile 文件见 [`examples/profile.yaml`](../examples/profile.yaml)。该文件不会被默认 `manifest.yaml` 加载，其中的示例工具也全部设置为 `enabled: false`。
+可以直接复制并修改的完整配置见 [`examples/manifest.yaml`](../examples/manifest.yaml) 和 [`examples/profile.yaml`](../examples/profile.yaml)。示例不会被默认 `profiles/manifest.yaml` 加载，其中的工具也全部设置为 `enabled: false`。
 
 ### 9.1 GitHub 单资产，解压为目录
 

@@ -120,6 +120,6 @@ mod tests {
             release.asset_url("updater-v1.2.3-linux.7z").unwrap(),
             "https://github.com/the-soloist/universal-tool-updater/releases/download/v1.2.3/updater-v1.2.3-linux.7z"
         );
-        assert!(release.asset_url("updater-v1.2.3-macos.7z").is_err());
+        assert!(release.asset_url("updater-v1.2.3-macos-arm64.7z").is_err());
     }
 }

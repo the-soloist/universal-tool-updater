@@ -45,8 +45,10 @@ pub(crate) fn redact_url(url: &str) -> String {
 /// in `output` so resumed transfers keep counting from the right position.
 /// `max_bytes` bounds the total byte count regardless of any declared
 /// Content-Length, so unannounced or chunked bodies cannot stream past the
-/// configured ceiling. `on_chunk` observes every chunk that was written,
-/// letting callers hash the body in lockstep with the bytes on disk.
+/// configured ceiling. `on_chunk` observes every chunk that was written along
+/// with the output handle, letting callers hash the body in lockstep with the
+/// bytes on disk and persist periodic checkpoints; a failing callback aborts
+/// the transfer as a fatal error.
 pub(crate) fn stream_response(
     response: &mut impl Read,
     output: &mut fs::File,
@@ -54,7 +56,7 @@ pub(crate) fn stream_response(
     start: u64,
     expected_end: Option<u64>,
     max_bytes: u64,
-    mut on_chunk: impl FnMut(&[u8]),
+    mut on_chunk: impl FnMut(&[u8], &mut fs::File) -> Result<(), anyhow::Error>,
 ) -> Result<u64, TransferFailure> {
     let mut downloaded = start;
     let mut buffer = [0_u8; 64 * 1024];
@@ -74,7 +76,9 @@ pub(crate) fn stream_response(
                         written: downloaded,
                     });
                 }
-                on_chunk(&buffer[..read]);
+                if let Err(error) = on_chunk(&buffer[..read], output) {
+                    return Err(TransferFailure::Fatal(error));
+                }
             }
             Err(error) => {
                 return Err(TransferFailure::Retryable {
@@ -148,7 +152,10 @@ mod tests {
             0,
             Some(body.len() as u64),
             body.len() as u64 + 1,
-            |chunk| hasher.update(chunk),
+            |chunk, _output| {
+                hasher.update(chunk);
+                Ok(())
+            },
         );
         drop(output);
         let written = transferred

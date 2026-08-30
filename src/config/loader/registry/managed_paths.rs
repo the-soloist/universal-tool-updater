@@ -17,16 +17,12 @@ impl ManagedPaths {
     pub(super) fn register(&mut self, config_path: &Path, tool: &Tool) -> Result<()> {
         let candidates = tool_paths(tool);
         for (index, candidate) in candidates.iter().enumerate() {
-            for existing in candidates.iter().skip(index + 1) {
-                if paths_conflict(candidate, existing) {
-                    return Err(conflict_error(config_path, candidate, existing).into());
-                }
-            }
-            if let Some(existing) = self
-                .entries
+            let existing = candidates
                 .iter()
-                .find(|existing| paths_conflict(candidate, existing))
-            {
+                .skip(index + 1)
+                .chain(self.entries.iter())
+                .find(|existing| paths_conflict(candidate, existing));
+            if let Some(existing) = existing {
                 return Err(conflict_error(config_path, candidate, existing).into());
             }
         }
@@ -114,6 +110,7 @@ fn paths_conflict(left: &ManagedPath, right: &ManagedPath) -> bool {
     if left.owner != right.owner {
         return true;
     }
+    // 事务备份按设计会与所属工具的目标路径重叠；其他重叠必须在并行更新前拒绝，避免路径竞争。
     if matches!(
         (left.kind, right.kind),
         (

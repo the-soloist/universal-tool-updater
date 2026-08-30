@@ -13,14 +13,14 @@ use universal_tool_updater::app;
 use universal_tool_updater::archive::ArchiveService;
 use universal_tool_updater::cli::{Cli, Command};
 use universal_tool_updater::config::model::{
-    ArtifactConfig, DefaultsConfig, ExtractionLimits, HookAction, HookConfig, InstallConfig,
-    ManifestFile, NetworkConfig, OutputMode, PathConfig, ReleaseConfig, SCHEMA_VERSION, ToolConfig,
-    ToolFile,
+    ArtifactConfig, DefaultsConfig, ExistingPolicy, ExtractionLimits, HookAction, HookConfig,
+    InstallConfig, ManifestFile, NetworkConfig, OutputMode, PathConfig, ReleaseConfig,
+    SCHEMA_VERSION, ToolConfig, ToolFile,
 };
 use zip::write::SimpleFileOptions;
 
 #[test]
-fn resolves_downloads_extracts_installs_and_records_state() {
+fn resolves_downloads_and_repairs_a_corrupt_merge_archive() {
     let workspace = tempdir().unwrap();
     let toolkit = workspace.path().join("Toolkit");
     let config_dir = workspace.path().join("config");
@@ -30,7 +30,7 @@ fn resolves_downloads_extracts_installs_and_records_state() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
-        for _ in 0..2 {
+        for _ in 0..4 {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0_u8; 2048];
             let size = stream.read(&mut request).unwrap();
@@ -89,6 +89,7 @@ fn resolves_downloads_extracts_installs_and_records_state() {
     )
     .unwrap();
     let mut defaults = DefaultsConfig::default();
+    defaults.install.existing = ExistingPolicy::Merge;
     defaults.install.save = OutputMode::Archive;
     defaults.install.archive_name = "{id}-{version}.7z".to_owned();
     let manifest = ManifestFile {
@@ -112,6 +113,28 @@ fn resolves_downloads_extracts_installs_and_records_state() {
     fs::write(&manifest_path, yaml_serde::to_string(&manifest).unwrap()).unwrap();
 
     app::run(Cli {
+        manifest: Some(manifest_path.clone()),
+        profiles: None,
+        verbose: false,
+        log_dir: None,
+        profile: Vec::new(),
+        command: Some(Command::Update {
+            tools: vec!["demo".to_owned()],
+            force: false,
+            create_missing: false,
+            dry_run: false,
+            no_progress: true,
+            jobs: None,
+        }),
+    })
+    .unwrap();
+
+    let saved_archive = toolkit.join("Demo/demo-1.2.3.7z");
+    assert!(saved_archive.is_file());
+    fs::write(&saved_archive, "corrupt archive").unwrap();
+
+    // 同版本归档损坏时，merge 不能再次读取坏包，应直接从可信发布产物重建。
+    app::run(Cli {
         manifest: Some(manifest_path),
         profiles: None,
         verbose: false,
@@ -129,8 +152,6 @@ fn resolves_downloads_extracts_installs_and_records_state() {
     .unwrap();
     server.join().unwrap();
 
-    let saved_archive = toolkit.join("Demo/demo-1.2.3.7z");
-    assert!(saved_archive.is_file());
     let extracted = workspace.path().join("saved-archive");
     ArchiveService::default()
         .extract(&saved_archive, &extracted, None)

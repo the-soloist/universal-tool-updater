@@ -360,6 +360,7 @@ fn extract_zip_lzma<R: Read>(
     expected_crc32: u32,
     archive: &Path,
 ) -> Result<()> {
+    // 字典大小来自归档文件，因此限制解码器的内存分配上限。
     const MAX_DICTIONARY_SIZE: u32 = 512 * 1024 * 1024;
 
     let mut header = [0_u8; 4];

@@ -17,36 +17,50 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            targets: x86_64-unknown-linux-musl
+            target: x86_64-unknown-linux-musl
+            use_zig: false
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            use_zig: true
           - os: windows-latest
-            targets: x86_64-pc-windows-msvc
+            target: x86_64-pc-windows-gnu
+            use_zig: false
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            use_zig: false
           - os: macos-latest
-            targets: aarch64-apple-darwin,x86_64-apple-darwin
+            target: aarch64-apple-darwin
+            use_zig: false
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            use_zig: false
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
-          targets: ${{ matrix.targets }}
+          targets: ${{ matrix.target }}
       - name: Check formatting
         if: runner.os == 'Linux'
         run: cargo fmt --all -- --check
       - name: Install musl linker
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.use_zig == false
         run: |
           sudo apt-get update
           sudo apt-get install --yes musl-tools
+      - name: Install Zig
+        if: matrix.use_zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.14.1
+      - name: Install cargo-zigbuild
+        if: matrix.use_zig
+        run: cargo install cargo-zigbuild --locked
       - name: Lint
         run: cargo clippy --all-targets --all-features -- -D warnings
-      # Runtime profiles live outside this repository; check command coverage uses
-      # self-contained configurations in tests/check_command.rs.
       - name: Test
         run: cargo test --all-targets --all-features
-      - name: Build release binary
-        if: runner.os != 'macOS'
+      - name: Build
         shell: bash
-        run: ./build.sh --target ${{ matrix.targets }}
-      - name: Build universal macOS release binary
-        if: runner.os == 'macOS'
-        run: ./build.sh --macos-universal
+        run: ./build.sh --target ${{ matrix.target }}

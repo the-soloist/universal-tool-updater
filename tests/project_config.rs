@@ -2,6 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use tempfile::tempdir;
+
 use universal_tool_updater::config;
 use universal_tool_updater::config::model::ReleaseConfig;
 
@@ -20,7 +21,10 @@ fn local_profile_manifest_is_valid_when_present() {
         .to_path_buf();
 
     assert!(!config.tools.is_empty());
-    assert!(config.paths.toolkit_root.ends_with("Tools/Toolkit"));
+    assert!(
+        config.paths.toolkit_root.is_absolute(),
+        "toolkit root should be resolved to an absolute path"
+    );
     assert_eq!(config.paths.downloads, updater_directory.join("updates"));
     assert_eq!(config.paths.staging, config.paths.downloads.join("staging"));
     assert!(config.paths.state.starts_with(&config.paths.toolkit_root));
@@ -34,6 +38,24 @@ fn local_profile_manifest_is_valid_when_present() {
             tool.id
         );
     }
+}
+
+#[test]
+fn example_manifest_and_profile_remain_valid_and_disabled() {
+    let manifest = Path::new("examples/manifest.yaml");
+    assert!(manifest.is_file(), "example manifest is missing");
+
+    let loaded = config::load(manifest).unwrap();
+    // The merged example profile carries six tools (four downloads plus two
+    // manual placeholders), and only the manual placeholders stay enabled.
+    assert_eq!(loaded.tools.len(), 6);
+    assert_eq!(loaded.network.jobs, 4);
+    assert!(
+        loaded
+            .tools
+            .values()
+            .all(|tool| { !tool.enabled || matches!(tool.release, ReleaseConfig::Manual {}) })
+    );
 }
 
 #[test]

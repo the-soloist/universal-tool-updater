@@ -178,6 +178,7 @@ fn comparable_form(path: PathBuf) -> PathBuf {
 }
 
 fn path_starts_with(path: &Path, base: &Path) -> bool {
+    // 统一按不区分大小写比较路径组件，使各平台的路径重叠检查遵循 Windows 语义。
     let mut path = path.components();
     base.components().all(|expected| {
         path.next().is_some_and(|actual| {

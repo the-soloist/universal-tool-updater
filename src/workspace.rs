@@ -9,6 +9,7 @@ use crate::domain::Tool;
 pub(crate) struct RunWorkspace {
     directory: TempDir,
     staging: TempDir,
+    downloads_root: PathBuf,
     partials: PathBuf,
 }
 
@@ -17,6 +18,9 @@ pub(crate) struct ToolWorkspace {
     downloads: PathBuf,
     unpacked: PathBuf,
     staging: PathBuf,
+    downloads_root: PathBuf,
+    run_directory: PathBuf,
+    tool_id: String,
     partials: PathBuf,
 }
 
@@ -52,6 +56,7 @@ impl RunWorkspace {
         Ok(Self {
             directory,
             staging,
+            downloads_root: downloads_root.to_path_buf(),
             partials: downloads_root.join(".partial"),
         })
     }
@@ -94,6 +99,9 @@ impl RunWorkspace {
             downloads,
             unpacked,
             staging,
+            downloads_root: self.downloads_root.clone(),
+            run_directory: self.directory.path().to_path_buf(),
+            tool_id: tool.id.clone(),
             partials,
         })
     }
@@ -116,31 +124,108 @@ impl ToolWorkspace {
         &self.partials
     }
 
-    pub(crate) fn clear_partials(&self) -> Result<()> {
-        match fs::symlink_metadata(&self.partials) {
-            Ok(metadata) if metadata.file_type().is_dir() => {
-                fs::remove_dir_all(&self.partials).with_context(|| {
-                    format!(
-                        "cannot clear partial download directory {}",
-                        self.partials.display()
-                    )
-                })?;
+    pub(crate) fn recoverable_download(&self, filename: &str) -> Result<Option<PathBuf>> {
+        let mut largest = None::<(u64, PathBuf)>;
+        for entry in fs::read_dir(&self.downloads_root).with_context(|| {
+            format!(
+                "cannot inspect previous runs in {}",
+                self.downloads_root.display()
+            )
+        })? {
+            let entry = entry.with_context(|| {
+                format!(
+                    "cannot inspect an entry in {}",
+                    self.downloads_root.display()
+                )
+            })?;
+            let path = entry.path();
+            if path == self.run_directory
+                || !entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("run-"))
+                || !entry
+                    .file_type()
+                    .with_context(|| format!("cannot inspect {}", path.display()))?
+                    .is_dir()
+            {
+                continue;
             }
-            Ok(_) => anyhow::bail!(
-                "partial download path {} is not a directory",
-                self.partials.display()
-            ),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "cannot inspect partial download directory {}",
-                        self.partials.display()
-                    )
-                });
+
+            let candidate = path.join(&self.tool_id).join("downloads").join(filename);
+            let metadata = match fs::symlink_metadata(&candidate) {
+                Ok(metadata) if metadata.file_type().is_file() => metadata,
+                Ok(_) => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("cannot inspect previous download {}", candidate.display())
+                    });
+                }
+            };
+            if largest
+                .as_ref()
+                .is_none_or(|(length, _)| metadata.len() > *length)
+            {
+                largest = Some((metadata.len(), candidate));
             }
         }
+        Ok(largest.map(|(_, path)| path))
+    }
+
+    pub(crate) fn clear_partials(&self) -> Result<()> {
+        clear_directory(
+            &self.partials,
+            "partial download",
+            "partial download directory",
+        )
+    }
+
+    pub(crate) fn clear_downloads(&self) -> Result<()> {
+        clear_directory(&self.downloads, "download", "completed download directory")?;
+        for entry in fs::read_dir(&self.downloads_root).with_context(|| {
+            format!(
+                "cannot inspect previous runs in {}",
+                self.downloads_root.display()
+            )
+        })? {
+            let entry = entry.with_context(|| {
+                format!(
+                    "cannot inspect an entry in {}",
+                    self.downloads_root.display()
+                )
+            })?;
+            if entry.path() == self.run_directory
+                || !entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("run-"))
+                || !entry
+                    .file_type()
+                    .with_context(|| format!("cannot inspect {}", entry.path().display()))?
+                    .is_dir()
+            {
+                continue;
+            }
+            // 进程中断可能留下旧 run 下载；工具成功后清掉同工具缓存，不影响其他工具的恢复文件。
+            clear_directory(
+                &entry.path().join(&self.tool_id).join("downloads"),
+                "download",
+                "completed download directory",
+            )?;
+        }
         Ok(())
+    }
+}
+
+fn clear_directory(path: &Path, path_label: &str, directory_label: &str) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() => fs::remove_dir_all(path)
+            .with_context(|| format!("cannot clear {directory_label} {}", path.display())),
+        Ok(_) => anyhow::bail!("{path_label} path {} is not a directory", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("cannot inspect {directory_label} {}", path.display())),
     }
 }
 
@@ -209,5 +294,35 @@ mod tests {
         assert!(!run_path.exists());
         assert!(!staging_run_path.exists());
         assert_eq!(fs::read_to_string(partial_path).unwrap(), "partial");
+    }
+
+    #[test]
+    fn clears_only_the_completed_downloads_for_one_tool_across_runs() {
+        let root = tempdir().unwrap();
+        let staging = root.path().join("staging");
+        let previous_first = root.path().join("run-previous/first/downloads");
+        let previous_second = root.path().join("run-previous/second/downloads");
+        fs::create_dir_all(&previous_first).unwrap();
+        fs::create_dir_all(&previous_second).unwrap();
+        fs::write(previous_first.join("artifact.zip"), "previous first").unwrap();
+        fs::write(previous_second.join("artifact.zip"), "previous second").unwrap();
+        let run = RunWorkspace::create(root.path(), &staging).unwrap();
+        let first = run.prepare(&tool("first", "first")).unwrap();
+        let second = run.prepare(&tool("second", "second")).unwrap();
+        fs::write(first.downloads().join("artifact.zip"), "first").unwrap();
+        fs::write(second.downloads().join("artifact.zip"), "second").unwrap();
+
+        first.clear_downloads().unwrap();
+
+        assert!(!first.downloads().exists());
+        assert!(!previous_first.exists());
+        assert_eq!(
+            fs::read_to_string(second.downloads().join("artifact.zip")).unwrap(),
+            "second"
+        );
+        assert_eq!(
+            fs::read_to_string(previous_second.join("artifact.zip")).unwrap(),
+            "previous second"
+        );
     }
 }

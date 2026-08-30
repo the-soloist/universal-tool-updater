@@ -13,7 +13,7 @@ use filesystem::{apply_executable_bits, copy_tree, single_directory_base};
 use output::{effective_mode, managed_archive_path, render_archive_name};
 use transaction::{CommitRequest, CommitSource, commit, same_filesystem};
 
-pub(crate) use output::installation_matches;
+pub(crate) use output::{installation_matches, installed_archive_path, installed_archive_state};
 
 use crate::archive::ArchiveService;
 use crate::domain::{
@@ -43,6 +43,28 @@ struct InstallJob<'a> {
     parent: &'a Path,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ExistingArchiveStatus {
+    #[default]
+    Unchecked,
+    Invalid,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct InstallOptions {
+    compression_threads: usize,
+    existing_archive: ExistingArchiveStatus,
+}
+
+impl InstallOptions {
+    pub(crate) fn new(compression_threads: usize, existing_archive: ExistingArchiveStatus) -> Self {
+        Self {
+            compression_threads,
+            existing_archive,
+        }
+    }
+}
+
 impl<'a> Installer<'a> {
     pub fn new(
         archive: &'a ArchiveService,
@@ -65,7 +87,7 @@ impl<'a> Installer<'a> {
         artifacts: &[DownloadedArtifact],
         workspace: &ToolWorkspace,
         progress: &TaskProgress,
-        compression_threads: usize,
+        options: InstallOptions,
     ) -> Result<()> {
         if artifacts.is_empty() {
             return Err(UpdaterError::Installation {
@@ -97,8 +119,12 @@ impl<'a> Installer<'a> {
         let combined = transaction.join("content");
         let preparer = ArtifactPreparer::new(self.archive, workspace.unpacked());
         let output_mode = effective_mode(tool);
+        let InstallOptions {
+            compression_threads,
+            existing_archive,
+        } = options;
 
-        self.stage_content(&job, &preparer, &combined, output_mode)?;
+        self.stage_content(&job, &preparer, &combined, output_mode, existing_archive)?;
         let external_version = self.stage_version_marker(&job, &combined, output_mode)?;
         let ready = self.package_archive(&job, &combined, output_mode, compression_threads)?;
         self.commit_staged(&job, &ready, external_version.as_deref())?;
@@ -111,13 +137,14 @@ impl<'a> Installer<'a> {
         preparer: &ArtifactPreparer<'_>,
         combined: &Path,
         output_mode: OutputMode,
+        existing_archive: ExistingArchiveStatus,
     ) -> Result<()> {
         let tool = job.tool;
         let destination = &tool.install.destination;
         fs::create_dir(combined)?;
 
         if tool.install.existing == ExistingPolicy::Merge && destination.exists() {
-            self.seed_existing(tool, destination, combined, output_mode)?;
+            self.seed_existing(tool, destination, combined, output_mode, existing_archive)?;
         }
 
         for (index, artifact) in job.artifacts.iter().enumerate() {
@@ -154,6 +181,7 @@ impl<'a> Installer<'a> {
         apply_executable_bits(tool, combined)
     }
 
+    // Copy 输入的目录输出把版本标记放在目标目录旁，避免把元数据混入用户文件。
     fn stage_version_marker(
         &self,
         job: &InstallJob<'_>,
@@ -247,39 +275,44 @@ impl<'a> Installer<'a> {
         destination: &Path,
         combined: &Path,
         output_mode: OutputMode,
+        existing_archive: ExistingArchiveStatus,
     ) -> Result<()> {
-        match output_mode {
-            OutputMode::Directory if tool.install.save == OutputMode::Archive => {
-                if let Some(archive) = managed_archive_path(tool, destination)? {
-                    self.archive.extract_for_tool(
-                        &tool.id,
-                        tool.install.allow_symlinks_in_archive,
-                        &archive,
-                        combined,
-                        None,
-                    )
-                } else {
-                    // destination -> combined must stay a real copy: a hard
-                    // link here would let the merge overwrite truncate
-                    // through the shared inode and poison the rollback
-                    // backup with new content.
-                    copy_tree(destination, combined, false)
-                }
+        let archives_existing =
+            output_mode == OutputMode::Archive || tool.install.save == OutputMode::Archive;
+        if archives_existing && let Some(archive) = managed_archive_path(tool, destination)? {
+            if existing_archive == ExistingArchiveStatus::Invalid {
+                return Ok(());
             }
-            OutputMode::Directory => copy_tree(destination, combined, false),
-            OutputMode::Archive => {
-                if let Some(archive) = managed_archive_path(tool, destination)? {
-                    self.archive.extract_for_tool(
-                        &tool.id,
-                        tool.install.allow_symlinks_in_archive,
-                        &archive,
-                        combined,
-                        None,
-                    )
-                } else {
-                    Ok(())
+            match self.archive.verify_7z(&archive) {
+                Ok(()) => {}
+                Err(error) if error.is_invalid() => {
+                    // 已损坏的合并基线无法可靠恢复；以发布产物重建，避免修复流程再次解压同一坏包。
+                    tracing::warn!(
+                        tool = %tool.id,
+                        path = %archive.display(),
+                        error = %error,
+                        "existing archive is invalid; rebuilding without its contents"
+                    );
+                    return Ok(());
                 }
+                Err(error) => return Err(error.into()),
             }
+            return self.archive.extract_for_tool(
+                &tool.id,
+                tool.install.allow_symlinks_in_archive,
+                &archive,
+                combined,
+                None,
+            );
+        }
+        if output_mode == OutputMode::Directory {
+            // destination -> combined must stay a real copy: a hard
+            // link here would let the merge overwrite truncate
+            // through the shared inode and poison the rollback
+            // backup with new content.
+            copy_tree(destination, combined, false)
+        } else {
+            Ok(())
         }
     }
 }
