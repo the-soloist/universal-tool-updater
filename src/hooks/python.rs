@@ -598,8 +598,14 @@ mod path_boundary_tests {
         let downloads_bin = downloads.join("bin");
         fs::create_dir_all(&toolkit_bin).unwrap();
         fs::create_dir_all(&downloads_bin).unwrap();
-        fs::write(toolkit_bin.join("python.exe"), b"").unwrap();
-        fs::write(downloads_bin.join("python.exe"), b"").unwrap();
+        // PATH search matches the bare name on Unix and appends .exe on Windows.
+        let program = if cfg!(windows) {
+            "python.exe"
+        } else {
+            "python"
+        };
+        fs::write(toolkit_bin.join(program), b"").unwrap();
+        fs::write(downloads_bin.join(program), b"").unwrap();
         let path_var = std::env::join_paths([&toolkit_bin, &downloads_bin]).unwrap();
         let hook_context = context(&toolkit, &downloads);
 

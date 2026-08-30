@@ -756,9 +756,13 @@ fn allows_tar_links_only_when_opted_in_and_bounded() {
     );
 
     let escaping = directory.path().join("escaping.tar.gz");
+    // bin/ + ../../ lands outside the extraction root; ../ alone would not.
     fs::write(
         &escaping,
-        gzip(&tar_link_with_target(tar::EntryType::Symlink, "../outside")),
+        gzip(&tar_link_with_target(
+            tar::EntryType::Symlink,
+            "../../outside",
+        )),
     )
     .unwrap();
     let error = ArchiveService::default()
