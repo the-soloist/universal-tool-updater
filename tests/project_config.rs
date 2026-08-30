@@ -3,6 +3,7 @@ use std::path::Path;
 
 use tempfile::tempdir;
 use universal_tool_updater::config;
+use universal_tool_updater::config::model::ReleaseConfig;
 
 #[test]
 fn local_profile_manifest_is_valid_when_present() {
@@ -36,7 +37,7 @@ fn local_profile_manifest_is_valid_when_present() {
 }
 
 #[test]
-fn example_profile_remains_valid_and_disabled() {
+fn example_profile_remains_valid_and_never_enables_downloadable_tools() {
     let source = Path::new("examples/profile.yaml");
     assert!(source.is_file(), "example profile is missing");
 
@@ -45,7 +46,7 @@ fn example_profile_remains_valid_and_disabled() {
     fs::write(
         directory.path().join("manifest.yaml"),
         r#"
-schema_version: 5
+schema_version: 6
 include: [example.yaml]
 paths:
   toolkit_root: ExampleToolkit
@@ -63,6 +64,13 @@ defaults:
     .unwrap();
 
     let loaded = config::load(&directory.path().join("manifest.yaml")).unwrap();
-    assert_eq!(loaded.tools.len(), 4);
-    assert!(loaded.tools.values().all(|tool| !tool.enabled));
+    assert_eq!(loaded.tools.len(), 6);
+    // Manual placeholders never download, so they may stay enabled; everything
+    // else in the example profile must remain disabled.
+    assert!(
+        loaded
+            .tools
+            .values()
+            .all(|tool| { !tool.enabled || matches!(tool.release, ReleaseConfig::Manual {}) })
+    );
 }

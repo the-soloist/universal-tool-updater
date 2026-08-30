@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::config::{AppConfig, Paths};
 use crate::display::width as display_width;
-use crate::domain::{InputMode, NetworkConfig, Tool};
+use crate::domain::{ExtractionLimits, InputMode, NetworkConfig, ReleaseConfig, Tool};
 use crate::test_support::tool as test_tool;
 
 use super::render_distribution;
@@ -64,6 +64,8 @@ fn config() -> AppConfig {
             state: PathBuf::from("/toolkit/.updater/state.yaml"),
         },
         network: NetworkConfig::default(),
+        allow_insecure_transports: false,
+        extraction_limits: ExtractionLimits::default(),
         tools,
     }
 }
@@ -117,4 +119,49 @@ fn filters_the_distribution_by_profile() {
     assert!(rendered.starts_with("工具分布 · 1 个工具\n"));
     assert!(rendered.contains("JADX"));
     assert!(!rendered.contains("Web"));
+}
+
+#[test]
+fn marks_manual_placeholders_in_the_tree() {
+    let mut manual = tool(
+        "ida-pro",
+        "IDA Pro",
+        "reverse",
+        "Reverse/Decompiler/IDA Pro",
+        InputMode::Extract,
+        true,
+    );
+    manual.release = ReleaseConfig::Manual {};
+    let managed = tool(
+        "jadx",
+        "JADX",
+        "reverse",
+        "Reverse/Decompiler/JADX",
+        InputMode::Extract,
+        true,
+    );
+    let tools = [manual, managed]
+        .into_iter()
+        .map(|tool| (tool.id.clone(), tool))
+        .collect::<BTreeMap<_, _>>();
+    let config = AppConfig {
+        app_root: PathBuf::from("/app"),
+        paths: Paths {
+            toolkit_root: PathBuf::from("/toolkit"),
+            downloads: PathBuf::from("/toolkit/updates"),
+            staging: PathBuf::from("/toolkit/updates/staging"),
+            state: PathBuf::from("/toolkit/.updater/state.yaml"),
+        },
+        network: NetworkConfig::default(),
+        allow_insecure_transports: false,
+        extraction_limits: ExtractionLimits::default(),
+        tools,
+    };
+
+    let rendered = render_distribution(&config, &[], 120).unwrap();
+
+    assert!(rendered.starts_with("工具分布 · 2 个工具\n"));
+    assert!(rendered.contains("IDA Pro [manual]"));
+    assert!(rendered.contains("JADX"));
+    assert!(!rendered.contains("JADX [manual]"));
 }

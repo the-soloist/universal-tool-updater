@@ -19,3 +19,31 @@ Thumbs.db
 
 # Local profile configuration (never commit these files)
 /profiles*
+
+# AI assistant configs and instruction files
+.zcode/
+.kilo/
+.opencode/
+.claude/
+.cursor/
+.windsurf/
+.aider*
+CLAUDE.md
+AGENTS.md
+.github/copilot-instructions.md
+
+# Environment variables
+.env.*
+*.env
+
+# Build and run outputs
+/dist/
+/out/
+/updates/
+/logs/
+/Toolkit/
+.updater/
+
+# Local analysis and handoff documents (keep only tracked official docs)
+/docs/*
+!/docs/YAML_CONFIGURATION.md

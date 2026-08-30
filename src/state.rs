@@ -69,23 +69,43 @@ impl StateStore {
             .map(|entry| entry.version.as_str())
     }
 
+    #[cfg(test)]
     pub fn record(&mut self, tool_id: &str, version: &str) -> Result<()> {
+        self.record_all(&[(tool_id.to_owned(), version.to_owned())])
+    }
+
+    /// Persists several tool versions with one serialization and one atomic
+    /// write, rolling every in-memory entry back when persistence fails.
+    pub fn record_all(&mut self, entries: &[(String, String)]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
         let updated_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .context("system time is before Unix epoch")?
             .as_secs();
-        let previous = self.data.tools.insert(
-            tool_id.to_owned(),
-            ToolState {
-                version: version.to_owned(),
-                updated_at,
-            },
-        );
+        let previous = entries
+            .iter()
+            .map(|(tool_id, version)| {
+                (
+                    tool_id.clone(),
+                    self.data.tools.insert(
+                        tool_id.clone(),
+                        ToolState {
+                            version: version.clone(),
+                            updated_at,
+                        },
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
         if let Err(error) = self.save() {
-            if let Some(previous) = previous {
-                self.data.tools.insert(tool_id.to_owned(), previous);
-            } else {
-                self.data.tools.remove(tool_id);
+            for (tool_id, previous) in previous {
+                if let Some(previous) = previous {
+                    self.data.tools.insert(tool_id, previous);
+                } else {
+                    self.data.tools.remove(&tool_id);
+                }
             }
             return Err(error);
         }
@@ -148,5 +168,71 @@ mod tests {
         let reloaded = StateStore::load(path).unwrap();
         assert_eq!(reloaded.version("failed"), None);
         assert_eq!(reloaded.version("working"), Some("v2"));
+    }
+
+    #[test]
+    fn record_all_persists_every_entry_in_one_write() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("state.yaml");
+        let mut state = StateStore::load(&path).unwrap();
+
+        state
+            .record_all(&[
+                ("bat".to_owned(), "v1.2.3".to_owned()),
+                ("frida".to_owned(), "16.7.19".to_owned()),
+            ])
+            .unwrap();
+
+        let reloaded = StateStore::load(&path).unwrap();
+        assert_eq!(reloaded.version("bat"), Some("v1.2.3"));
+        assert_eq!(reloaded.version("frida"), Some("16.7.19"));
+    }
+
+    #[test]
+    fn record_all_matches_sequential_record_results() {
+        let batched = tempdir().unwrap();
+        let sequential = tempdir().unwrap();
+        let mut batched = StateStore::load(batched.path().join("state.yaml")).unwrap();
+        let mut sequential = StateStore::load(sequential.path().join("state.yaml")).unwrap();
+        let entries = vec![
+            ("bat".to_owned(), "v1.2.3".to_owned()),
+            ("frida".to_owned(), "16.7.19".to_owned()),
+            ("bat".to_owned(), "v1.3.0".to_owned()),
+        ];
+
+        batched.record_all(&entries).unwrap();
+        for (tool_id, version) in &entries {
+            sequential.record(tool_id, version).unwrap();
+        }
+
+        assert_eq!(batched.version("bat"), sequential.version("bat"));
+        assert_eq!(batched.version("frida"), sequential.version("frida"));
+    }
+
+    #[test]
+    fn restores_in_memory_state_when_batched_persistence_fails() {
+        let directory = tempdir().unwrap();
+        let parent = directory.path().join("state");
+        let path = parent.join("state.yaml");
+        let mut state = StateStore::load(&path).unwrap();
+        std::fs::write(&parent, "blocks directory creation").unwrap();
+
+        assert!(
+            state
+                .record_all(&[
+                    ("alpha".to_owned(), "v1".to_owned()),
+                    ("beta".to_owned(), "v2".to_owned())
+                ])
+                .is_err()
+        );
+        assert_eq!(state.version("alpha"), None);
+        assert_eq!(state.version("beta"), None);
+
+        std::fs::remove_file(&parent).unwrap();
+        state.record("working", "v3").unwrap();
+        let reloaded = StateStore::load(&path).unwrap();
+        assert_eq!(reloaded.version("alpha"), None);
+        assert_eq!(reloaded.version("beta"), None);
+        assert_eq!(reloaded.version("working"), Some("v3"));
     }
 }

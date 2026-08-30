@@ -4,7 +4,7 @@ mod replacement;
 mod status;
 
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -13,19 +13,19 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use console::Term;
 use indicatif::{ProgressBar, ProgressStyle};
-use reqwest::StatusCode;
 use reqwest::blocking::{Client, Response};
 use semver::Version;
+use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
 use crate::archive::ArchiveService;
+use crate::downloader::transfer::{self, TransferFailure};
 
 use replacement::InstallOutcome;
 
 const CHECKSUMS_ASSET: &str = "SHA256SUMS.txt";
 const LOCK_FILENAME: &str = ".updater-self-update.lock";
 const MAX_CHECKSUM_FILE_SIZE: u64 = 1024 * 1024;
-const TRANSFER_ATTEMPTS: usize = 3;
 const WORK_DIRECTORY_PREFIX: &str = ".updater-self-update-";
 
 #[derive(Debug, Clone, Copy)]
@@ -109,9 +109,12 @@ pub fn run(options: SelfUpdateOptions) -> Result<SelfUpdateOutcome> {
     println!("Verified SHA-256 for {archive_name}");
 
     let extract_dir = work_dir.path().join("extracted");
-    ArchiveService.extract(&archive_path, &extract_dir, None)?;
+    ArchiveService::default().extract(&archive_path, &extract_dir, None)?;
     let candidate = find_candidate(&extract_dir)?;
-    prepare_candidate(&candidate)?;
+    prepare_candidate(
+        #[cfg(unix)]
+        &candidate,
+    )?;
     verify_candidate(&candidate, &release.version)?;
 
     match replacement::install(&target, &candidate, work_dir, &release.version, &mut lock)? {
@@ -264,7 +267,7 @@ fn find_candidate(directory: &Path) -> Result<PathBuf> {
     Ok(candidate)
 }
 
-fn prepare_candidate(path: &Path) -> Result<()> {
+fn prepare_candidate(#[cfg(unix)] path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -307,14 +310,14 @@ fn verify_candidate(path: &Path, expected: &Version) -> Result<()> {
 }
 
 fn download(client: &Client, url: &str, destination: &Path, filename: &str) -> Result<()> {
-    tracing::info!(url, filename, path = %destination.display(), "self-update download started");
+    tracing::info!(url = %transfer::redact_url(url), filename, path = %destination.display(), "self-update download started");
     println!("Downloading {filename}");
-    for attempt in 1..=TRANSFER_ATTEMPTS {
+    for attempt in 1..=transfer::ATTEMPTS {
         let response = match client.get(url).send() {
             Ok(response) => response,
-            Err(error) if attempt < TRANSFER_ATTEMPTS => {
+            Err(error) if attempt < transfer::ATTEMPTS => {
                 tracing::warn!(attempt, error = %error, "self-update request failed; retrying");
-                thread::sleep(Duration::from_millis(500 * attempt as u64));
+                thread::sleep(transfer::backoff_delay(attempt));
                 continue;
             }
             Err(error) => {
@@ -324,25 +327,25 @@ fn download(client: &Client, url: &str, destination: &Path, filename: &str) -> R
         };
         let status = response.status();
         if !status.is_success() {
-            if attempt < TRANSFER_ATTEMPTS && retryable_status(status) {
+            if attempt < transfer::ATTEMPTS && transfer::is_retryable_status(Some(status)) {
                 tracing::warn!(attempt, %status, "self-update server error; retrying");
-                thread::sleep(Duration::from_millis(500 * attempt as u64));
+                thread::sleep(transfer::backoff_delay(attempt));
                 continue;
             }
             bail!("cannot download {filename} from {url}: HTTP status {status}");
         }
         match transfer_response(response, destination, filename)? {
             TransferOutcome::Complete(bytes) => {
-                tracing::info!(url, filename, bytes, path = %destination.display(), "self-update download completed");
+                tracing::info!(url = %transfer::redact_url(url), filename, bytes, path = %destination.display(), "self-update download completed");
                 return Ok(());
             }
-            TransferOutcome::Interrupted(message) if attempt < TRANSFER_ATTEMPTS => {
+            TransferOutcome::Interrupted(message) if attempt < transfer::ATTEMPTS => {
                 tracing::warn!(
                     attempt,
                     error = message,
                     "self-update response body failed; retrying"
                 );
-                thread::sleep(Duration::from_millis(500 * attempt as u64));
+                thread::sleep(transfer::backoff_delay(attempt));
             }
             TransferOutcome::Interrupted(message) => {
                 bail!(
@@ -366,40 +369,36 @@ fn transfer_response(
 ) -> Result<TransferOutcome> {
     let total = response.content_length();
     let progress = download_progress(filename, total);
+    let max_bytes = crate::archive::Limits::default().max_total_bytes;
     let mut output = File::create(destination)
         .with_context(|| format!("cannot create download file {}", destination.display()))?;
-    let mut downloaded = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        match response.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(read) => {
-                output.write_all(&buffer[..read]).with_context(|| {
-                    format!("cannot write download file {}", destination.display())
-                })?;
-                downloaded += read as u64;
-                progress.inc(read as u64);
-            }
-            Err(error) => {
-                progress.finish_and_clear();
-                return Ok(TransferOutcome::Interrupted(format!(
-                    "cannot read response body: {error}"
-                )));
-            }
-        }
-    }
-    output
-        .sync_all()
-        .with_context(|| format!("cannot sync download file {}", destination.display()))?;
+    // Self-update verifies against SHA256SUMS.txt after the transfer, so
+    // the pipelined digest is computed and discarded here.
+    let mut digest = Sha256::new();
+    let transferred = transfer::stream_response(
+        &mut response,
+        &mut output,
+        destination,
+        0,
+        total,
+        max_bytes,
+        |chunk| {
+            digest.update(chunk);
+            progress.inc(chunk.len() as u64);
+        },
+    );
+    drop(digest);
     progress.finish_and_clear();
-    if let Some(total) = total
-        && total != downloaded
-    {
-        return Ok(TransferOutcome::Interrupted(format!(
-            "response ended at {downloaded} bytes, expected {total}"
-        )));
+    match transferred {
+        Ok(bytes) => Ok(TransferOutcome::Complete(bytes)),
+        Err(TransferFailure::Fatal(error)) => Err(error),
+        Err(TransferFailure::Retryable { message, .. }) => {
+            Ok(TransferOutcome::Interrupted(message))
+        }
+        Err(TransferFailure::LimitExceeded { written }) => bail!(
+            "download of {filename} wrote {written} bytes, exceeding the transfer limit of {max_bytes} bytes"
+        ),
     }
-    Ok(TransferOutcome::Complete(downloaded))
 }
 
 fn download_progress(filename: &str, total: Option<u64>) -> ProgressBar {
@@ -422,12 +421,6 @@ fn download_progress(filename: &str, total: Option<u64>) -> ProgressBar {
     progress.set_style(style);
     progress.set_message(filename.to_owned());
     progress
-}
-
-fn retryable_status(status: StatusCode) -> bool {
-    status == StatusCode::REQUEST_TIMEOUT
-        || status == StatusCode::TOO_MANY_REQUESTS
-        || status.is_server_error()
 }
 
 struct UpdateLock {

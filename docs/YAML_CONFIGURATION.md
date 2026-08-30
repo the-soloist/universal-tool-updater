@@ -1,6 +1,6 @@
 # YAML 配置文件编写规范
 
-本文档描述 Universal Tool Updater 当前使用的 YAML schema。配置由一个 `manifest.yaml` 和若干 profile 文件组成；当前 schema 版本为 `5`。
+本文档描述 Universal Tool Updater 当前使用的 YAML schema。配置由一个 `manifest.yaml` 和若干 profile 文件组成；当前 schema 版本为 `6`。
 
 解析器会拒绝未知字段、错误枚举值和不满足跨字段约束的配置。修改配置后必须执行 `updater check`，不要只依赖 YAML 编辑器的语法检查。
 
@@ -32,7 +32,7 @@ profiles/
 完整的 manifest 示例：
 
 ```yaml
-schema_version: 5
+schema_version: 6
 
 include:
   - crypto.yaml
@@ -49,6 +49,12 @@ paths:
   downloads: updates
   staging: updates/staging
   state: .updater/state.yaml
+
+allow_insecure_transports: false
+
+extraction_limits:
+  max_total_bytes: 8589934592
+  max_entries: 100000
 
 network:
   user_agent: Universal-Tool-Updater/3
@@ -71,11 +77,13 @@ defaults:
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
-| `schema_version` | 是 | 必须为 `5`。 |
+| `schema_version` | 是 | 必须为 `6`。 |
 | `include` | 是 | 非空的 profile 文件列表。 |
 | `paths` | 是 | 全局路径配置。 |
+| `allow_insecure_transports` | 否 | 默认 `false`，此时所有 URL 必须使用 HTTPS。显式设为 `true` 才允许 HTTP 明文下载；运行时会为每个 HTTP 下载打印醒目警告。 |
 | `network` | 否 | 网络和并发配置；省略时使用默认值。 |
 | `defaults` | 否 | 工具安装默认值；工具自身的同名字段优先。 |
+| `extraction_limits` | 否 | 解压与下载配额；省略时使用默认值（见 2.5）。 |
 
 ### 2.2 paths
 
@@ -98,7 +106,7 @@ defaults:
 | `timeout_seconds` | integer | `60` | 必须大于 `0`。 |
 | `progress` | boolean | `true` | 是否显示下载进度。 |
 | `github_token_env` | string | `GITHUB_TOKEN` | 保存环境变量名，不保存 token；格式为 `[A-Za-z_][A-Za-z0-9_]*`。 |
-| `jobs` | integer | `4` | 同时执行的完整工具更新任务数，必须大于 `0`。 |
+| `jobs` | integer | `4` | 同时执行的完整工具更新任务数，必须大于 `0`。默认 `4` 适合网络与磁盘混合负载；以解压为主的批量更新可尝试 `6`–`8`；不建议超过逻辑核心数。 |
 
 命令行 `updater update --jobs N` 会覆盖 `network.jobs`。GitHub token 应通过 `github_token_env` 指定的环境变量注入，不要直接写入 YAML。
 
@@ -114,6 +122,15 @@ defaults:
 | `install.archive_name` | `{name} - {version}.7z` | `save: archive` 的输出文件名模板。 |
 
 `archive_name` 只能是文件名，不能包含目录；支持 `{id}`、`{name}`、`{version}` 三个占位符。最终保存为压缩包时扩展名必须为 `.7z`。
+
+### 2.5 extraction_limits
+
+| 字段 | 类型 | 默认值 | 约束 |
+| --- | --- | --- | --- |
+| `max_total_bytes` | integer | `8589934592`（8 GiB） | 必须大于 `0`。 |
+| `max_entries` | integer | `100000` | 必须大于 `0`。 |
+
+解压 zip/tar/7z/rar 时逐条目累计未压缩大小和条目数量，超过任一上限即在写入前拒绝；gz/xz 单文件解压按同一 `max_total_bytes` 计数。下载侧对 `Content-Length`（或续传的完整大小）执行同一 `max_total_bytes` 检查，超限直接报错。整个节点可省略，两个子字段也均可省略（分别取默认值）。
 
 ## 3. Profile 与工具字典
 
@@ -140,8 +157,8 @@ tools:
 | --- | --- | --- | --- |
 | `name` | 否 | 工具 ID | 展示名，也可用于压缩包名称模板。 |
 | `enabled` | 否 | `true` | 为 `false` 时更新结果为 skipped。 |
-| `release` | 是 | 无 | 版本来源，只能选择一种类型。 |
-| `artifacts` | 是 | 无 | 非空的下载产物列表。 |
+| `release` | 是 | 无 | 版本来源，只能选择一种类型；`manual` 为占位类型，不参与自动更新。 |
+| `artifacts` | 是 | 无 | 下载产物列表；除 `manual` 工具必须为空列表 `[]` 外，其余类型不能为空。 |
 | `install` | 是 | 无 | 安装目标和处理策略。 |
 | `hooks` | 否 | 空 | 有序的原生 action 或 Python action。 |
 
@@ -177,10 +194,12 @@ release:
   repository: fatedier/frp
   ignore_versions:
     - v0.70.0
+  allow_prereleases: false
 ```
 
 - `repository` 必须为合法的 `owner/repository`，不能包含 URL 或多余路径。
 - `ignore_versions` 可省略，用于跳过指定 release tag；条目不能为空或重复。
+- `allow_prereleases` 可省略，默认 `false`。默认跳过 prerelease，与自更新链路行为一致；设为 `true` 才允许选中预发布版。配置 GitHub token 走 API 解析时按 release 的 prerelease 标记过滤；无 token 的 atom 路径按 semver 解析 tag（容忍 `v` 前缀），含预发布段（如 `1.0.0-rc1`）的 tag 默认跳过，无法解析为 semver 的 tag（如 `nightly-20260829`）不受该过滤影响。需要精确控制请配置 token（见 `network.github_token_env`）。
 - 配置 GitHub token 后通过 API 解析 release；未配置 token 时使用公开 release 信息。
 
 ### 4.2 Web 页面
@@ -194,7 +213,7 @@ release:
     - 1.2.0-beta
 ```
 
-- `url` 必须是带主机名的 HTTP/HTTPS URL。
+- `url` 必须是带主机名的 HTTPS URL；仅当 manifest 设置 `allow_insecure_transports: true` 时才允许 HTTP。
 - `version_pattern` 是 Rust 正则表达式，必须至少包含一个捕获组；第一个捕获组就是版本号。
 - 避免使用正则 look-around 或反向引用，因为 Rust `regex` 不支持这些特性。
 
@@ -212,21 +231,37 @@ release:
 
 HTTP 类型会对 URL 发起 HEAD 请求，按顺序找到第一个存在的 `version_headers`，并对该 header 值计算稳定摘要作为版本号。列表不能为空，header 名称必须合法且不区分大小写地唯一。
 
+### 4.4 Manual 占位
+
+```yaml
+release:
+  type: manual
+```
+
+`manual` 用于登记无法自动更新的工具（如付费授权、无公开下载源的 IDA Pro，或发布在需登录论坛的工具）。它没有任何子字段，配置多余字段会被拒绝。
+
+- `artifacts` 必须写为空列表 `[]`；配置任何下载产物都会报错，因为 manual 工具不参与更新。
+- `install.destination` 仍必填：占位目录照常参与 managed paths 冲突检测，防止其他工具把安装目录配到同一位置。
+- updater 永不解析版本、不下载、不安装；`update` 汇总中显示为 `skipped`（`managed manually; not auto-updated`），不会被视为失败。
+- `list` 与 `list --tree` 中正常展示，并带 `[manual]` 标注。
+
 ## 5. artifacts：下载产物
 
 同一工具可以配置多个 artifact，按配置顺序解析和安装。完全相同的 artifact 配置不能重复。
 
 ### 5.1 类型兼容表
 
-| artifact 类型 | GitHub | Web | HTTP | 说明 |
-| --- | :---: | :---: | :---: | --- |
-| `github-asset` | 是 | 否 | 否 | 下载第一个匹配的 release asset。 |
-| `github-assets` | 是 | 否 | 否 | 下载所有匹配的 release assets。 |
-| `github-source` | 是 | 否 | 否 | 下载 release tag 对应的源码包。 |
-| `page-link` | 否 | 是 | 否 | 从 Web 页面的链接正则中提取 URL。 |
-| `direct-url` | 是 | 是 | 是 | 下载固定 URL。 |
-| `url-template` | 是 | 是 | 是 | 用解析到的版本替换 `{version}` 后下载。 |
-| `release-url` | 否 | 否 | 是 | 直接下载 HTTP release 的 URL。 |
+| artifact 类型 | GitHub | Web | HTTP | Manual | 说明 |
+| --- | :---: | :---: | :---: | :---: | --- |
+| `github-asset` | 是 | 否 | 否 | 否 | 下载第一个匹配的 release asset。 |
+| `github-assets` | 是 | 否 | 否 | 否 | 下载所有匹配的 release assets。 |
+| `github-source` | 是 | 否 | 否 | 否 | 下载 release tag 对应的源码包。 |
+| `page-link` | 否 | 是 | 否 | 否 | 从 Web 页面的链接正则中提取 URL。 |
+| `direct-url` | 是 | 是 | 是 | 否 | 下载固定 URL。 |
+| `url-template` | 是 | 是 | 是 | 否 | 用解析到的版本替换 `{version}` 后下载。 |
+| `release-url` | 否 | 否 | 是 | 否 | 直接下载 HTTP release 的 URL。 |
+
+`manual` 工具唯一合法的 artifacts 组合是空列表 `artifacts: []`（见 4.4）。
 
 ### 5.2 github-asset 与 github-assets
 
@@ -248,6 +283,18 @@ artifacts:
 
 `pattern` 匹配 GitHub asset 的完整文件名。建议使用 `^` 和 `$` 锚定，并对 `.` 写成 `\.`，避免误匹配。`github-asset` 只取第一个匹配项；需要保存同一 release 的多个平台文件时使用 `github-assets`。
 
+两者都支持可选的 `sha256` 完整性固定（pin）：下载完成后、安装前计算文件 SHA-256 并比对，不匹配则删除断点缓存并按下载失败处理。
+
+- `github-asset` 的 `sha256` 支持 `{version}` 占位符（其余部分仍须为十六进制），解析版本后会先渲染再比对。
+- `github-assets` 的 `sha256` 应用于每个匹配的产物，只接受静态 64 位十六进制值，不支持占位符（多资产共享同一模板无法逐一渲染）。
+
+```yaml
+artifacts:
+  - type: github-asset
+    pattern: '^tool-v[^/]+-windows-x64\.zip$'
+    sha256: 2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae
+```
+
 ### 5.3 github-source
 
 ```yaml
@@ -256,7 +303,14 @@ artifacts:
     format: tar.gz
 ```
 
-`format` 只支持 `zip` 或 `tar.gz`。
+`format` 只支持 `zip` 或 `tar.gz`。同样支持可选的静态 `sha256`（64 位十六进制，不支持占位符），在安装前对源码包做完整性校验。
+
+```yaml
+artifacts:
+  - type: github-source
+    format: tar.gz
+    sha256: 2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae
+```
 
 ### 5.4 page-link
 
@@ -285,12 +339,19 @@ artifacts:
 artifacts:
   - type: direct-url
     url: https://example.com/runtime/helper.zip
+    sha256: 2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae
 
   - type: url-template
     url: 'https://example.com/releases/{version}/tool-{version}.zip'
+    sha256: '{version}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 ```
 
-`url-template` 必须包含 `{version}`，且不允许其他占位符。所有 URL 都必须使用 HTTP 或 HTTPS 并包含主机名。
+`url-template` 必须包含 `{version}`，且不允许其他占位符。所有 URL 都必须使用 HTTPS 并包含主机名；仅当 manifest 设置 `allow_insecure_transports: true` 时才允许 HTTP。
+
+`direct-url` 与 `url-template` 支持可选的 `sha256` 校验通道（`github-asset`、`github-assets`、`github-source` 也支持，见 5.2/5.3）：
+
+- 值必须是 64 位十六进制字符；下载完成后、安装前会计算文件 SHA-256 并比对，不匹配则删除断点缓存并按下载失败处理。
+- `url-template` 与 `github-asset` 的 `sha256` 支持 `{version}` 占位符（其余部分仍须为十六进制），解析版本后会先渲染再比对。`direct-url`、`github-assets` 与 `github-source` 的 `sha256` 不允许占位符。
 
 HTTP release 的原始文件可以写为：
 
@@ -321,6 +382,7 @@ install:
 | `archive_name` | string | 7z 输出文件名模板。 |
 | `archive_password` | string | 解压加密输入包的密码，不能为空。 |
 | `executable` | path list | 安装后必须存在的相对文件；Unix 上添加执行位。 |
+| `allow_symlinks_in_archive` | boolean | 默认 `false`。是否允许输入压缩包内的 symlink/hardlink 条目（见 6.5）。 |
 | `symlinks` | mapping list | 安装完成后创建的符号链接。 |
 
 ### 6.1 input
@@ -379,9 +441,22 @@ install:
 
 - `executable` 和 `symlinks.from` 必须是安装内容内的安全相对路径，不能包含 `..`。
 - 相对的 `symlinks.to` 以 `toolkit_root` 为基准；也允许绝对目标。
+- Windows 前提：创建符号链接要求系统开启「开发者模式」，或以管理员身份运行 updater；权限不足时安装失败，错误信息中附带该指引。
 - 符号链接目标不能重复、不能与自身源路径相同，也不能和其他工具管理的路径重叠。
 - `save: archive` 不能配置 `symlinks`。
 - `input: copy` 不能配置 `archive_password`。
+
+### 6.5 allow_symlinks_in_archive
+
+解压 tar 时，包含 symlink 或 hardlink 条目的压缩包默认整体拒绝，与自更新链路的安全基线一致。确有需要时按工具显式开启：
+
+```yaml
+install:
+  destination: Tools/LinkedTool
+  allow_symlinks_in_archive: true
+```
+
+开启后仍有两条硬性约束，违反即拒绝：link 目标必须是相对路径；目标与条目位置拼接后（存在则 canonicalize，不存在则按文本归一化）必须仍在解压目录内。绝对目标或指向解压目录外部的目标一律拒绝。zip/7z/rar 后端维持各自的既有行为，不受该开关影响。
 
 ## 7. hooks：跨平台后处理
 
@@ -437,6 +512,7 @@ hooks:
         - --strict
       timeout_seconds: 60
       working_directory: staging
+      environment_mode: minimal
       environment:
         MODE: portable
 ```
@@ -447,6 +523,7 @@ hooks:
 | `args` | 否 | `[]` | 直接传递给脚本的参数列表，不经过 Shell。 |
 | `timeout_seconds` | 否 | `300` | 必须大于 `0`。 |
 | `working_directory` | 否 | `toolkit` | `app`、`toolkit`、`downloads`、`staging` 或 `install`。 |
+| `environment_mode` | 否 | `minimal` | `minimal` 或 `inherit`；见下方说明。 |
 | `environment` | 否 | `{}` | 额外环境变量。 |
 
 `working_directory: staging` 只允许用于 `after_unpack`。脚本会收到以下保留环境变量，配置中的 `environment` 不允许覆盖任何以 `UTU_` 开头的变量：
@@ -458,6 +535,11 @@ hooks:
 - `UTU_INSTALL_DIR`
 - `UTU_STAGING_DIR`（当前阶段可用时）
 - `UTU_VERSION`（版本已解析时）
+
+`environment_mode` 控制子进程的初始环境：
+
+- `minimal`（默认）：不继承父环境，仅保留 `PATH`、`SYSTEMROOT`（仅 Windows）、`TEMP`、`TMP`、`TZ`，再叠加全部 `UTU_*` 保留变量和 `environment` 配置变量。脚本依赖其他系统变量时必须在 `environment` 中显式传入。
+- `inherit`：继承 updater 的完整环境（旧行为），仅建议在脚本确实依赖大量系统变量时显式开启。
 
 解释器查找顺序：
 
@@ -594,11 +676,12 @@ updater update <tool-id> --dry-run
 | `version regex needs a capture group` | Web 版本正则没有捕获组。 | 用括号捕获真正的版本部分。 |
 | `destination must not end with 'release'` | `input: copy` 时手动写了 release。 | 从 destination 删除末尾 `release`。 |
 | `non-portable filename` | 名称含跨平台非法字符，或 `#` 未正确引用。 | 使用安全名称，并给包含 `#` 的模板加引号。 |
-| `overlapping destinations` | 两个工具管理了相同或父子路径。 | 按分类为每个工具分配独立 destination。 |
+| `manual tools are not auto-updated and must not configure artifacts` | `type: manual` 的占位工具配置了下载产物。 | 删除全部 artifact 条目，保留 `artifacts: []`（见 4.4）。 |
+| `overlapping destinations` | 两个工具管理了相同或父子路径。 | 按分类为每个工具分配独立 destination。manual 占位工具同样占用其 destination。 |
 
 ## 11. 提交前检查清单
 
-- `schema_version` 为 `5`，新增 profile 已加入 `include`。
+- `schema_version` 为 `6`，新增 profile 已加入 `include`。
 - 工具 ID 使用小写 kebab-case，且没有与其他 profile 重复。
 - 工具展示名和 destination 遵循 `<工具>@<作者>` 与分类目录约定。
 - GitHub asset 正则使用当前真实文件名验证过，并尽量用 `^...$` 锚定。

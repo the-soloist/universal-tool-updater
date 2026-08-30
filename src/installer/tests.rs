@@ -3,9 +3,9 @@ use std::fs;
 use tempfile::tempdir;
 
 use crate::archive::ArchiveService;
-use crate::config::model::{ArtifactConfig, ExistingPolicy, InputMode, OutputMode, ReleaseConfig};
-#[cfg(unix)]
-use crate::config::model::{HookAction, HookConfig};
+use crate::config::model::{
+    ArtifactConfig, ExistingPolicy, HookAction, HookConfig, InputMode, OutputMode, ReleaseConfig,
+};
 use crate::domain::DownloadedArtifact;
 #[cfg(unix)]
 use crate::domain::SymlinkSpec;
@@ -72,7 +72,7 @@ fn keeps_github_copy_artifacts_uncompressed_and_records_release_version() {
     fs::create_dir_all(&destination).unwrap();
     fs::write(destination.parent().unwrap().join(".version"), "v1\n").unwrap();
 
-    let archive_service = ArchiveService;
+    let archive_service = ArchiveService::default();
     archive_service
         .compress_7z(&old_content, &destination.join("Demo-v1.7z"))
         .unwrap();
@@ -89,12 +89,15 @@ fn keeps_github_copy_artifacts_uncompressed_and_records_release_version() {
     tool.artifacts = vec![
         ArtifactConfig::GithubAsset {
             pattern: "demo.zip".to_owned(),
+            sha256: None,
         },
         ArtifactConfig::GithubAssets {
             pattern: "demo.xz".to_owned(),
+            sha256: None,
         },
         ArtifactConfig::GithubSource {
             format: "tar.gz".to_owned(),
+            sha256: None,
         },
     ];
     tool.install.input = InputMode::Copy;
@@ -107,9 +110,10 @@ fn keeps_github_copy_artifacts_uncompressed_and_records_release_version() {
     let mut mixed_tool = tool.clone();
     mixed_tool.artifacts.push(ArtifactConfig::DirectUrl {
         url: "https://example.com/demo.bin".to_owned(),
+        sha256: None,
     });
     assert_eq!(effective_mode(&mixed_tool), OutputMode::Directory);
-    let hook_runner = HookRunner;
+    let hook_runner = HookRunner::default();
     let installer = Installer::new(&archive_service, &hook_runner, directory.path(), &toolkit);
     let run = RunWorkspace::create(&downloads, &downloads.join("staging")).unwrap();
     let workspace = run.prepare(&tool).unwrap();
@@ -175,7 +179,7 @@ fn directory_output_records_version_inside_destination() {
     fs::create_dir(&payload).unwrap();
     fs::write(payload.join("demo.bin"), "demo").unwrap();
     let artifact = downloads.join("demo.7z");
-    let archive_service = ArchiveService;
+    let archive_service = ArchiveService::default();
     archive_service.compress_7z(&payload, &artifact).unwrap();
 
     let mut tool = test_tool("demo", destination.clone());
@@ -187,8 +191,9 @@ fn directory_output_records_version_inside_destination() {
     };
     tool.artifacts = vec![ArtifactConfig::DirectUrl {
         url: "https://example.com/demo.7z".to_owned(),
+        sha256: None,
     }];
-    let hook_runner = HookRunner;
+    let hook_runner = HookRunner::default();
     let installer = Installer::new(&archive_service, &hook_runner, directory.path(), &toolkit);
     let run = RunWorkspace::create(&downloads, &downloads.join("staging")).unwrap();
     let workspace = run.prepare(&tool).unwrap();
@@ -238,6 +243,7 @@ fn restores_previous_installation_when_post_install_hook_fails() {
     tool.name = "Demo".to_owned();
     tool.artifacts = vec![ArtifactConfig::GithubAsset {
         pattern: "demo".to_owned(),
+        sha256: None,
     }];
     tool.install.input = InputMode::Copy;
     tool.install.symlinks = vec![SymlinkSpec {
@@ -251,8 +257,8 @@ fn restores_previous_installation_when_post_install_hook_fails() {
         }],
         ..HookConfig::default()
     };
-    let archive_service = ArchiveService;
-    let hook_runner = HookRunner;
+    let archive_service = ArchiveService::default();
+    let hook_runner = HookRunner::default();
     let installer = Installer::new(&archive_service, &hook_runner, directory.path(), &toolkit);
     let run = RunWorkspace::create(&downloads, &downloads.join("staging")).unwrap();
     let workspace = run.prepare(&tool).unwrap();
@@ -282,6 +288,70 @@ fn restores_previous_installation_when_post_install_hook_fails() {
         destination.join("old.txt")
     );
     assert!(!tool_root.join(".version.utu-backup").exists());
+}
+
+/// Guard for the link direction in `seed_existing`: the merge seed must
+/// copy, because a hard-linked seed file would let the artifact overwrite
+/// truncate through the shared inode and replace the rollback backup's
+/// content with the new bytes (D4.3).
+#[test]
+fn merge_rollback_restores_the_original_file_content() {
+    let directory = tempdir().unwrap();
+    let toolkit = directory.path().join("Toolkit");
+    let downloads = toolkit.join("updates");
+    let destination = toolkit.join("Demo");
+    fs::create_dir_all(&downloads).unwrap();
+    fs::create_dir(&destination).unwrap();
+    fs::write(destination.join("X"), "old").unwrap();
+    let artifact = downloads.join("X");
+    fs::write(&artifact, "new").unwrap();
+
+    let mut tool = test_tool("demo", destination.clone());
+    tool.name = "Demo".to_owned();
+    tool.artifacts = vec![ArtifactConfig::GithubAsset {
+        pattern: "X".to_owned(),
+        sha256: None,
+    }];
+    tool.install.input = InputMode::Copy;
+    tool.install.existing = ExistingPolicy::Merge;
+    // The after-install rename has no staging directory, so the hook fails
+    // after the merge committed and forces a rollback.
+    tool.hooks = HookConfig {
+        after_install: vec![HookAction::Rename {
+            from: "X".to_owned(),
+            to: "renamed.bin".into(),
+        }],
+        ..HookConfig::default()
+    };
+
+    let archive_service = ArchiveService::default();
+    let hook_runner = HookRunner::default();
+    let installer = Installer::new(&archive_service, &hook_runner, directory.path(), &toolkit);
+    let run = RunWorkspace::create(&downloads, &downloads.join("staging")).unwrap();
+    let workspace = run.prepare(&tool).unwrap();
+    let progress = ProgressManager::new(false, 1);
+    let task_progress = progress.task(&tool.profile, &tool.name);
+
+    let result = installer.install(
+        &tool,
+        "v2",
+        &[DownloadedArtifact { path: artifact }],
+        &workspace,
+        &task_progress,
+        1,
+    );
+    assert!(
+        result.is_err(),
+        "the after-install hook must fail the transaction"
+    );
+
+    assert_eq!(
+        fs::read_to_string(destination.join("X")).unwrap(),
+        "old",
+        "rollback must restore the pre-merge bytes, not the overwritten ones"
+    );
+    assert!(!toolkit.join("Demo.utu-backup").exists());
+    assert!(!toolkit.join(".version").exists());
 }
 
 #[test]

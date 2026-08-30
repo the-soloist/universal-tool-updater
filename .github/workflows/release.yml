@@ -18,6 +18,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - name: Match tag to Cargo version
         shell: bash
         run: |
@@ -27,6 +30,10 @@ jobs:
             echo "error: tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${expected}" >&2
             exit 1
           fi
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --all-targets
 
   build-linux:
     name: Build Linux x86_64 musl
@@ -57,7 +64,7 @@ jobs:
             cd target/x86_64-unknown-linux-musl/release
             "${seven_zip}" a -t7z -mx=9 "${archive}" updater
           )
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v8
         with:
           name: linux-x86_64-musl
           path: dist/*
@@ -98,7 +105,7 @@ jobs:
           } finally {
             Pop-Location
           }
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v8
         with:
           name: windows-x86_64-msvc
           path: dist/*
@@ -129,7 +136,7 @@ jobs:
             cd target/universal-apple-darwin/release
             "${seven_zip}" a -t7z -mx=9 "${archive}" updater
           )
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v8
         with:
           name: macos-universal
           path: dist/*

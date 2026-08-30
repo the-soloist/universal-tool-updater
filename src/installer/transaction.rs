@@ -34,7 +34,12 @@ pub(super) fn commit(request: CommitRequest<'_>) -> Result<()> {
     });
     let mut installation =
         InstallationTransaction::begin(destination, version_destination.as_deref())?;
-    if let Err(error) = installation.install(request.ready, request.external_version) {
+    if let Err(error) = installation.install(
+        request.tool.id.as_str(),
+        request.version,
+        request.ready,
+        request.external_version,
+    ) {
         return Err(with_rollback(error, installation.rollback()));
     }
 

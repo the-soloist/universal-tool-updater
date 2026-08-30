@@ -10,13 +10,96 @@ use sevenz_rust::encoder_options::Lzma2Options;
 use sevenz_rust::{ArchiveEntry, ArchiveWriter};
 use walkdir::WalkDir;
 
+use crate::domain::ExtractionLimits;
 use crate::error::UpdaterError;
 
-pub struct ArchiveService;
+/// Cumulative extraction quotas enforced across every archive entry before
+/// decompression, and mirrored onto download content lengths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    pub max_total_bytes: u64,
+    pub max_entries: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_total_bytes: 8 * 1024 * 1024 * 1024,
+            max_entries: 100_000,
+        }
+    }
+}
+
+impl From<ExtractionLimits> for Limits {
+    fn from(limits: ExtractionLimits) -> Self {
+        Self {
+            max_total_bytes: limits.max_total_bytes,
+            max_entries: limits.max_entries,
+        }
+    }
+}
+
+/// Tool attribution and symlink policy threaded through a single extraction.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ExtractionContext<'a> {
+    pub(crate) tool_id: Option<&'a str>,
+    pub(crate) allow_symlinks: bool,
+    pub(crate) limits: Limits,
+}
+
+#[derive(Default)]
+pub struct ArchiveService {
+    limits: Limits,
+}
 
 impl ArchiveService {
+    pub fn with_limits(limits: Limits) -> Self {
+        Self { limits }
+    }
+
     pub fn extract(
         &self,
+        archive: &Path,
+        destination: &Path,
+        password: Option<&str>,
+    ) -> Result<()> {
+        self.extract_with(
+            ExtractionContext {
+                tool_id: None,
+                allow_symlinks: false,
+                limits: self.limits,
+            },
+            archive,
+            destination,
+            password,
+        )
+    }
+
+    /// Tool-scoped extraction: quota violations name the tool and archives
+    /// containing links are only permitted when the tool opted in.
+    pub(crate) fn extract_for_tool(
+        &self,
+        tool_id: &str,
+        allow_symlinks: bool,
+        archive: &Path,
+        destination: &Path,
+        password: Option<&str>,
+    ) -> Result<()> {
+        self.extract_with(
+            ExtractionContext {
+                tool_id: Some(tool_id),
+                allow_symlinks,
+                limits: self.limits,
+            },
+            archive,
+            destination,
+            password,
+        )
+    }
+
+    fn extract_with(
+        &self,
+        context: ExtractionContext<'_>,
         archive: &Path,
         destination: &Path,
         password: Option<&str>,
@@ -33,14 +116,14 @@ impl ArchiveService {
         })?;
 
         match kind {
-            ArchiveKind::Zip => extract::zip(archive, destination, password),
-            ArchiveKind::SevenZip => extract::seven_zip(archive, destination, password),
-            ArchiveKind::Rar => extract::rar(archive, destination, password),
-            ArchiveKind::TarGz => extract::tar_gzip(archive, destination),
-            ArchiveKind::TarBz2 => extract::tar_bzip2(archive, destination),
-            ArchiveKind::TarXz => extract::tar_xz(archive, destination),
-            ArchiveKind::Gzip => extract::gzip(archive, destination),
-            ArchiveKind::Xz => extract::xz(archive, destination),
+            ArchiveKind::Zip => extract::zip(archive, destination, password, &context),
+            ArchiveKind::SevenZip => extract::seven_zip(archive, destination, password, &context),
+            ArchiveKind::Rar => extract::rar(archive, destination, password, &context),
+            ArchiveKind::TarGz => extract::tar_gzip(archive, destination, &context),
+            ArchiveKind::TarBz2 => extract::tar_bzip2(archive, destination, &context),
+            ArchiveKind::TarXz => extract::tar_xz(archive, destination, &context),
+            ArchiveKind::Gzip => extract::gzip(archive, destination, &context),
+            ArchiveKind::Xz => extract::xz(archive, destination, &context),
         }
     }
 

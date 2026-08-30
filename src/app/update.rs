@@ -6,9 +6,9 @@ use std::thread;
 
 use anyhow::{Context, Result, bail};
 
-use crate::archive::ArchiveService;
+use crate::archive::{ArchiveService, Limits};
 use crate::config::AppConfig;
-use crate::domain::{Tool, UpdateResult, UpdateStatus};
+use crate::domain::{ReleaseConfig, Tool, UpdateResult, UpdateStatus};
 use crate::downloader::Downloader;
 use crate::hooks::{HookContext, HookRunner, HookStage};
 use crate::installer::{Installer, installation_matches};
@@ -59,8 +59,9 @@ pub(super) fn update_tools(
                 .map(|version| (tool.id.clone(), version.to_owned()))
         })
         .collect::<BTreeMap<_, _>>();
-    let resolver = Resolver::new(&config.network)?;
-    let downloader = Downloader::new(resolver.client().clone());
+    let resolver = Resolver::new(&config.network, config.allow_insecure_transports)?;
+    let limits = Limits::from(config.extraction_limits);
+    let downloader = Downloader::new(resolver.client().clone(), limits);
     let workspace = if options.dry_run {
         None
     } else {
@@ -69,8 +70,8 @@ pub(super) fn update_tools(
             &config.paths.staging,
         )?)
     };
-    let archive = ArchiveService;
-    let hooks = HookRunner;
+    let archive = ArchiveService::with_limits(limits);
+    let hooks = HookRunner::default();
     let installer = Installer::new(
         &archive,
         &hooks,
@@ -136,24 +137,33 @@ pub(super) fn update_tools(
         }
         drop(sender);
 
+        let mut state_entries = Vec::<(String, String)>::new();
+        let mut state_indices = Vec::<usize>::new();
         for _ in 0..selected.len() {
-            let mut outcome = receiver
+            let outcome = receiver
                 .recv()
                 .context("update worker stopped before returning every tool result")?;
             if outcome.result.status == UpdateStatus::Updated {
                 let version = outcome
                     .result
                     .version
-                    .as_deref()
+                    .clone()
                     .expect("updated results always contain a version");
-                if let Err(error) = state.record(&outcome.result.tool_id, version) {
-                    outcome.result.status = UpdateStatus::Failed;
-                    outcome.result.message =
-                        format!("update installed but state could not be recorded: {error:#}");
-                }
+                state_indices.push(outcome.index);
+                state_entries.push((outcome.result.tool_id.clone(), version));
             }
             progress.complete(&outcome.progress);
             ordered_results[outcome.index] = Some(outcome.result);
+        }
+        if let Err(error) = state.record_all(&state_entries) {
+            for index in state_indices {
+                let result = ordered_results[index]
+                    .as_mut()
+                    .expect("every selected tool returns one result");
+                result.status = UpdateStatus::Failed;
+                result.message =
+                    format!("update installed but state could not be recorded: {error:#}");
+            }
         }
         Ok(())
     });
@@ -190,6 +200,14 @@ impl UpdateSession<'_> {
     fn update_one(&self, tool: &Tool, progress: &TaskProgress) -> Result<UpdateResult> {
         if !tool.enabled {
             return Ok(result(tool, UpdateStatus::Skipped, None, "disabled"));
+        }
+        if matches!(tool.release, ReleaseConfig::Manual {}) {
+            return Ok(result(
+                tool,
+                UpdateStatus::Skipped,
+                None,
+                "managed manually; not auto-updated",
+            ));
         }
         if !tool.install.destination.exists()
             && !tool.install.create_destination

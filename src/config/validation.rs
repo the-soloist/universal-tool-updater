@@ -3,6 +3,7 @@ mod release;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use anyhow::Result;
 use regex::Regex;
@@ -58,6 +59,22 @@ pub(super) fn validate_manifest_values(path: &Path, manifest: &ManifestFile) -> 
         .into());
     }
 
+    let limits = &manifest.extraction_limits;
+    if limits.max_total_bytes == 0 {
+        return Err(UpdaterError::config(
+            path,
+            "extraction_limits.max_total_bytes must be greater than zero",
+        )
+        .into());
+    }
+    if limits.max_entries == 0 {
+        return Err(UpdaterError::config(
+            path,
+            "extraction_limits.max_entries must be greater than zero",
+        )
+        .into());
+    }
+
     validate_archive_name(
         path,
         "defaults.install.archive_name",
@@ -71,6 +88,7 @@ pub(super) fn validate_tool_config(
     id: &str,
     tool: &ToolConfig,
     app_root: &Path,
+    allow_insecure_transports: bool,
 ) -> Result<()> {
     validate_id(path, id)?;
     if let Some(name) = &tool.name {
@@ -94,8 +112,14 @@ pub(super) fn validate_tool_config(
             .into());
         }
     }
-    release::validate(path, id, &tool.release)?;
-    release::validate_artifacts(path, id, &tool.release, &tool.artifacts)?;
+    release::validate(path, id, &tool.release, allow_insecure_transports)?;
+    release::validate_artifacts(
+        path,
+        id,
+        &tool.release,
+        &tool.artifacts,
+        allow_insecure_transports,
+    )?;
     hooks::validate(path, id, &tool.hooks, app_root)?;
     validate_install_config(path, id, &tool.install)
 }
@@ -273,9 +297,11 @@ fn validate_relative_tool_path(path: &Path, id: &str, field: &str, value: &Path)
     Ok(())
 }
 
+static TOOL_ID_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-z0-9]+(?:-[a-z0-9]+)*$").expect("static regex"));
+
 fn validate_id(path: &Path, id: &str) -> Result<()> {
-    let valid = Regex::new(r"^[a-z0-9]+(?:-[a-z0-9]+)*$").expect("static regex");
-    if !valid.is_match(id) {
+    if !TOOL_ID_PATTERN.is_match(id) {
         return Err(UpdaterError::config(
             path,
             format!(

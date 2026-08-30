@@ -1,5 +1,6 @@
+use std::fmt::Write as _;
 use std::fs;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{BufReader, ErrorKind, Read};
 use std::path::Path;
 use std::thread;
 
@@ -7,9 +8,12 @@ use anyhow::{Context, Result};
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
 use reqwest::header::{CONTENT_RANGE, ETAG, LAST_MODIFIED};
+use sha2::{Digest, Sha256};
 mod http;
 mod partial;
+pub(crate) mod transfer;
 
+use crate::archive::Limits;
 use crate::domain::{DownloadedArtifact, ResolvedArtifact, Tool};
 use crate::error::UpdaterError;
 use crate::paths::{filename_from_url, safe_filename};
@@ -17,21 +21,68 @@ use crate::progress::TaskProgress;
 use crate::workspace::ToolWorkspace;
 
 use http::{
-    ATTEMPTS, RETRY_DELAY, byte_range, filename_from_disposition, response_header, send_with_retry,
-    unsatisfied_total, validator_unchanged,
+    byte_range, filename_from_disposition, response_header, send_with_retry, unsatisfied_total,
+    validator_unchanged,
 };
-use partial::{Metadata as PartialMetadata, clear as clear_partial, length as partial_length};
 use partial::{
-    load as load_partial_metadata, paths as partial_paths, save as save_partial_metadata,
+    Metadata as PartialMetadata, SessionLock, clear as clear_partial, length as partial_length,
 };
+use partial::{
+    empty_prefix_sha256, hash_prefix, load as load_partial_metadata, paths as partial_paths,
+    save as save_partial_metadata,
+};
+use transfer::{ATTEMPTS, TransferFailure, backoff_delay, redact_url, stream_response};
+
+/// Upper bound on zero-offset restarts caused by inconsistent servers.
+const MAX_RESTARTS: usize = 3;
+
+/// SHA-256 state kept in lockstep with the streamed bytes. `hashed_len`
+/// counts the bytes fed to the hasher, so the digest equals the SHA-256 of
+/// the first `hashed_len` file bytes only while that count matches the
+/// current file length; otherwise callers fall back to a full re-read
+/// (sessions resumed from a previous run, cross-restart rounds).
+struct StreamedDigest {
+    hasher: Sha256,
+    hashed_len: u64,
+}
+
+impl Default for StreamedDigest {
+    fn default() -> Self {
+        Self {
+            hasher: Sha256::new(),
+            hashed_len: 0,
+        }
+    }
+}
+
+impl StreamedDigest {
+    fn reset(&mut self) {
+        self.hasher = Sha256::new();
+        self.hashed_len = 0;
+    }
+
+    fn synced_with(&self, len: u64) -> bool {
+        self.hashed_len == len
+    }
+
+    fn prefix_digest(&self) -> String {
+        self.hasher
+            .clone()
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+}
 
 pub struct Downloader {
     client: Client,
+    limits: Limits,
 }
 
 impl Downloader {
-    pub fn new(client: Client) -> Self {
-        Self { client }
+    pub fn new(client: Client, limits: Limits) -> Self {
+        Self { client, limits }
     }
 
     pub(crate) fn download(
@@ -43,6 +94,7 @@ impl Downloader {
         artifacts: usize,
         progress: &TaskProgress,
     ) -> Result<DownloadedArtifact> {
+        warn_insecure_transport(tool, &artifact.url);
         let directory = workspace.downloads();
         let completion = DownloadCompletion {
             tool,
@@ -58,12 +110,16 @@ impl Downloader {
                 partial_directory.display()
             )
         })?;
+        let _session_lock = SessionLock::acquire(partial_directory, &tool.id)?;
         let (temporary, metadata_path) = partial_paths(partial_directory, &artifact.url);
         let mut metadata = load_partial_metadata(&metadata_path, &temporary, &artifact.url)?;
         let mut downloaded = partial_length(metadata.as_ref(), &temporary)?;
+        let mut streamed = StreamedDigest::default();
 
         let mut transfer_attempt = 1;
+        let mut restarts = 0_usize;
         loop {
+            let iteration_start = downloaded;
             let requested_offset = downloaded;
             let validator = metadata.as_ref().and_then(PartialMetadata::validator);
             let mut response = send_with_retry(
@@ -92,9 +148,13 @@ impl Downloader {
                         &metadata_path,
                         &partial.filename,
                         requested_offset,
+                        // The bytes came from a previous session; no in-run
+                        // digest covers them.
+                        None,
                     );
                 }
 
+                count_restart(tool, &artifact.url, &mut restarts)?;
                 tracing::warn!(
                     tool = %tool.id,
                     url = %artifact.url,
@@ -105,6 +165,7 @@ impl Downloader {
                 clear_partial(&metadata_path, &temporary)?;
                 metadata = None;
                 downloaded = 0;
+                streamed.reset();
                 continue;
             }
 
@@ -147,6 +208,7 @@ impl Downloader {
                         }
                         .into());
                     }
+                    count_restart(tool, &artifact.url, &mut restarts)?;
                     tracing::warn!(
                         tool = %tool.id,
                         url = %artifact.url,
@@ -157,6 +219,7 @@ impl Downloader {
                     clear_partial(&metadata_path, &temporary)?;
                     metadata = None;
                     downloaded = 0;
+                    streamed.reset();
                     continue;
                 }
             } else if requested_offset > 0 {
@@ -168,6 +231,7 @@ impl Downloader {
                     "server did not resume the download; restarting from zero"
                 );
                 downloaded = 0;
+                streamed.reset();
             }
             let append = requested_offset > 0 && status == StatusCode::PARTIAL_CONTENT;
 
@@ -201,9 +265,31 @@ impl Downloader {
             } else {
                 response.content_length()
             };
+            if let Some(total) = total.filter(|total| *total > self.limits.max_total_bytes) {
+                return Err(UpdaterError::Download {
+                    tool: tool.id.clone(),
+                    message: format!(
+                        "download from {} reports {total} bytes, exceeding the extraction limit of {} bytes",
+                        artifact.url, self.limits.max_total_bytes
+                    ),
+                }
+                .into());
+            }
+            // The prefix digest covers the bytes already on disk: a resumed
+            // transfer carries the digest verified at load time forward,
+            // while a fresh transfer starts from the empty digest. Bytes
+            // streamed this round are hashed as they arrive and folded into
+            // the metadata once per round, keeping the hashing linear.
+            let (prefix_sha256, prefix_len) = if append {
+                let partial = metadata
+                    .as_ref()
+                    .expect("a resumed transfer keeps its verified metadata");
+                (partial.prefix_sha256.clone(), partial.prefix_len)
+            } else {
+                (empty_prefix_sha256(), 0)
+            };
             let next_metadata = PartialMetadata {
                 schema_version: partial::SCHEMA_VERSION,
-                url: artifact.url.clone(),
                 filename: filename.clone(),
                 etag: response_header(&response, &ETAG)
                     .or_else(|| append.then(|| metadata.as_ref()?.etag.clone()).flatten()),
@@ -213,6 +299,8 @@ impl Downloader {
                         .flatten()
                 }),
                 total,
+                prefix_sha256,
+                prefix_len,
             };
             let mut output = fs::OpenOptions::new()
                 .create(true)
@@ -223,6 +311,7 @@ impl Downloader {
                 .with_context(|| format!("cannot open partial download {}", temporary.display()))?;
             if !append {
                 downloaded = 0;
+                streamed.reset();
             }
             save_partial_metadata(&metadata_path, &next_metadata)?;
             metadata = Some(next_metadata);
@@ -232,7 +321,7 @@ impl Downloader {
                 artifact = index + 1,
                 artifacts,
                 filename,
-                url = %artifact.url,
+                url = %redact_url(&artifact.url),
                 resumed_from = downloaded,
                 bytes = ?total,
                 "artifact download started"
@@ -240,34 +329,44 @@ impl Downloader {
             progress.download(index + 1, artifacts, &filename, total);
             progress.set_position(downloaded);
 
-            let mut buffer = [0_u8; 64 * 1024];
-            let transfer_error = loop {
-                match response.read(&mut buffer) {
-                    Ok(0) => break None,
-                    Ok(read) => {
-                        output.write_all(&buffer[..read]).with_context(|| {
-                            format!("cannot write download file {}", temporary.display())
-                        })?;
-                        downloaded += read as u64;
-                        progress.inc(read as u64);
-                    }
-                    Err(error) => break Some(format!("cannot read response body: {error}")),
-                }
+            let on_chunk = |chunk: &[u8]| {
+                streamed.hasher.update(chunk);
+                streamed.hashed_len += chunk.len() as u64;
+                progress.inc(chunk.len() as u64);
             };
-            output
-                .sync_all()
-                .with_context(|| format!("cannot sync download file {}", temporary.display()))?;
+            let transferred = stream_response(
+                &mut response,
+                &mut output,
+                &temporary,
+                downloaded,
+                response_end,
+                self.limits.max_total_bytes,
+                on_chunk,
+            );
             drop(output);
 
-            let transfer_error = transfer_error.or_else(|| {
-                response_end
-                    .filter(|expected| downloaded != *expected)
-                    .map(|expected| {
-                        format!(
-                            "download response ended at {downloaded}, expected {expected} bytes"
-                        )
-                    })
-            });
+            let transfer_error = match transferred {
+                Ok(written) => {
+                    downloaded = written;
+                    None
+                }
+                Err(TransferFailure::Retryable { written, message }) => {
+                    downloaded = written;
+                    Some(message)
+                }
+                Err(TransferFailure::Fatal(error)) => return Err(error),
+                Err(TransferFailure::LimitExceeded { written }) => {
+                    clear_partial(&metadata_path, &temporary)?;
+                    return Err(UpdaterError::Download {
+                        tool: tool.id.clone(),
+                        message: format!(
+                            "download from {} wrote {written} bytes, exceeding the extraction limit of {} bytes",
+                            artifact.url, self.limits.max_total_bytes
+                        ),
+                    }
+                    .into());
+                }
+            };
             if let Some(message) = transfer_error {
                 if transfer_attempt < ATTEMPTS {
                     tracing::warn!(
@@ -278,7 +377,13 @@ impl Downloader {
                         error = message,
                         "download body failed; resuming"
                     );
-                    thread::sleep(RETRY_DELAY * transfer_attempt as u32);
+                    thread::sleep(backoff_delay(transfer_attempt));
+                    refresh_partial_prefix(
+                        &temporary,
+                        &metadata_path,
+                        metadata.as_mut(),
+                        Some(&streamed),
+                    )?;
                     transfer_attempt += 1;
                     continue;
                 }
@@ -302,13 +407,113 @@ impl Downloader {
             if status == StatusCode::PARTIAL_CONTENT
                 && total.is_some_and(|total| downloaded < total)
             {
-                transfer_attempt = 1;
+                if downloaded <= iteration_start {
+                    return Err(UpdaterError::Download {
+                        tool: tool.id.clone(),
+                        message: format!(
+                            "download from {} made no progress in the last transfer round",
+                            artifact.url
+                        ),
+                    }
+                    .into());
+                }
+                refresh_partial_prefix(
+                    &temporary,
+                    &metadata_path,
+                    metadata.as_mut(),
+                    Some(&streamed),
+                )?;
                 continue;
             }
 
-            return completion.finalize(&temporary, &metadata_path, &filename, downloaded);
+            return completion.finalize(
+                &temporary,
+                &metadata_path,
+                &filename,
+                downloaded,
+                Some(&streamed),
+            );
         }
     }
+}
+
+fn warn_insecure_transport(tool: &Tool, url: &str) {
+    if let Ok(parsed) = url::Url::parse(url)
+        && parsed.scheme() == "http"
+    {
+        tracing::warn!(
+            tool = %tool.id,
+            url = %redact_url(url),
+            "downloading over plain HTTP; the connection is not encrypted and the download can be tampered with (allow_insecure_transports is enabled)"
+        );
+    }
+}
+
+fn count_restart(tool: &Tool, url: &str, restarts: &mut usize) -> Result<()> {
+    if *restarts >= MAX_RESTARTS {
+        return Err(UpdaterError::Download {
+            tool: tool.id.clone(),
+            message: format!(
+                "download from {url} restarted {} time(s) without completing; restart limit is {MAX_RESTARTS}",
+                *restarts
+            ),
+        }
+        .into());
+    }
+    *restarts += 1;
+    Ok(())
+}
+
+/// Re-hashes the grown partial and re-saves the metadata so the next session
+/// can verify the resume point. Runs once per transfer round, keeping the
+/// hashing cost linear per round instead of per metadata write. When the
+/// streaming digest covers the whole file, its in-memory state replaces the
+/// re-read.
+fn refresh_partial_prefix(
+    temporary: &Path,
+    metadata_path: &Path,
+    metadata: Option<&mut PartialMetadata>,
+    streamed: Option<&StreamedDigest>,
+) -> Result<()> {
+    let Some(metadata) = metadata else {
+        return Ok(());
+    };
+    let len = fs::metadata(temporary)
+        .with_context(|| format!("cannot inspect partial download {}", temporary.display()))?
+        .len();
+    metadata.prefix_sha256 = match streamed.filter(|digest| digest.synced_with(len)) {
+        Some(digest) => digest.prefix_digest(),
+        None => hash_prefix(temporary, len)?,
+    };
+    metadata.prefix_len = len;
+    save_partial_metadata(metadata_path, metadata)
+}
+
+fn verify_sha256(path: &Path, expected: &str) -> std::result::Result<(), String> {
+    let file =
+        fs::File::open(path).map_err(|error| format!("cannot open {}: {error}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| format!("cannot hash {}: {error}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let mut actual = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        write!(&mut actual, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    if !actual.eq_ignore_ascii_case(expected) {
+        return Err(format!(
+            "sha256 checksum mismatch: expected {expected}, got {actual}"
+        ));
+    }
+    Ok(())
 }
 
 struct DownloadCompletion<'a> {
@@ -326,7 +531,28 @@ impl DownloadCompletion<'_> {
         metadata: &Path,
         filename: &str,
         downloaded: u64,
+        streamed: Option<&StreamedDigest>,
     ) -> Result<DownloadedArtifact> {
+        if let Some(expected) = &self.artifact.expected_sha256 {
+            // The streaming digest is authoritative only when it covers the
+            // exact file length; anything else re-reads the file.
+            let memory = streamed.filter(|digest| digest.synced_with(downloaded));
+            let verification = match memory.map(|digest| digest.prefix_digest()) {
+                Some(actual) if actual.eq_ignore_ascii_case(expected) => Ok(()),
+                Some(actual) => Err(format!(
+                    "sha256 checksum mismatch: expected {expected}, got {actual}"
+                )),
+                None => verify_sha256(partial, expected),
+            };
+            if let Err(message) = verification {
+                clear_partial(metadata, partial)?;
+                return Err(UpdaterError::Download {
+                    tool: self.tool.id.clone(),
+                    message: format!("{message} for {}", self.artifact.url),
+                }
+                .into());
+            }
+        }
         let destination = self.directory.join(filename);
         if destination.exists() {
             return Err(UpdaterError::Download {
@@ -353,7 +579,7 @@ impl DownloadCompletion<'_> {
             artifact = self.index + 1,
             artifacts = self.artifacts,
             filename,
-            url = %self.artifact.url,
+            url = %redact_url(&self.artifact.url),
             bytes = downloaded,
             path = %destination.display(),
             "artifact download completed"

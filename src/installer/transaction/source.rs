@@ -39,7 +39,9 @@ impl CommitSource {
                 )
             })?;
         let copied_ready = transaction.path().join("ready");
-        copy_tree(ready, &copied_ready).with_context(|| {
+        // Cross-filesystem by construction, so hard links could only fail
+        // per file here; copy directly.
+        copy_tree(ready, &copied_ready, false).with_context(|| {
             format!(
                 "cannot transfer staged installation for {} from {} to {}",
                 tool.id,

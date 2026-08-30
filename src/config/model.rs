@@ -4,11 +4,11 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 pub use crate::domain::{
-    ArtifactConfig, ExistingPolicy, HookAction, HookConfig, HookWorkingDirectory, InputMode,
-    NetworkConfig, OutputMode, ReleaseConfig,
+    ArtifactConfig, EnvironmentMode, ExistingPolicy, ExtractionLimits, HookAction, HookConfig,
+    HookWorkingDirectory, InputMode, NetworkConfig, OutputMode, ReleaseConfig,
 };
 
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -20,6 +20,12 @@ pub struct ManifestFile {
     pub network: NetworkConfig,
     #[serde(default)]
     pub defaults: DefaultsConfig,
+    /// Extraction quotas for archives and downloads; defaults to 8 GiB / 100k entries.
+    #[serde(default, skip_serializing_if = "ExtractionLimits::is_default")]
+    pub extraction_limits: ExtractionLimits,
+    /// Permits plain-HTTP download URLs; HTTPS remains the only default.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_insecure_transports: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -110,6 +116,10 @@ fn is_true(value: &bool) -> bool {
     *value
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct InstallConfig {
@@ -130,6 +140,8 @@ pub struct InstallConfig {
     pub archive_password: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub executable: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_symlinks_in_archive: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub symlinks: Vec<SymlinkConfig>,
 }

@@ -5,7 +5,7 @@ use std::path::Path;
 use tempfile::tempdir;
 use zip::write::SimpleFileOptions;
 
-use super::{ArchiveService, archive_stem};
+use super::{ArchiveService, Limits, archive_stem};
 
 #[test]
 fn recognizes_compound_archive_stems() {
@@ -33,13 +33,59 @@ fn extracts_zip_without_leaving_destination() {
     std::io::Write::write_all(&mut archive, b"ok").unwrap();
     archive.finish().unwrap();
 
-    ArchiveService
+    ArchiveService::default()
         .extract(&archive_path, &output_path, None)
         .unwrap();
     assert_eq!(
         fs::read_to_string(output_path.join("folder/tool.txt")).unwrap(),
         "ok"
     );
+}
+
+/// Extraction through the 256 KiB buffered path must produce byte-identical
+/// output across runs and match the payload digest (A2 regression).
+#[test]
+fn buffered_extraction_output_matches_the_payload_digest() {
+    use sha2::{Digest, Sha256};
+
+    let directory = tempdir().unwrap();
+    let archive_path = directory.path().join("large.zip");
+    // One entry past the 256 KiB buffer plus a small second entry, so the
+    // output crosses several buffer flush boundaries.
+    let mut payload = vec![0_u8; 600 * 1024];
+    for (index, byte) in payload.iter_mut().enumerate() {
+        *byte = (index % 251) as u8;
+    }
+    let file = fs::File::create(&archive_path).unwrap();
+    let mut archive = zip::ZipWriter::new(file);
+    archive
+        .start_file("large.bin", SimpleFileOptions::default())
+        .unwrap();
+    std::io::Write::write_all(&mut archive, &payload).unwrap();
+    archive
+        .start_file("small.bin", SimpleFileOptions::default())
+        .unwrap();
+    std::io::Write::write_all(&mut archive, b"tail").unwrap();
+    archive.finish().unwrap();
+
+    let expected = Sha256::digest(&payload);
+    let mut digests = Vec::new();
+    for run in 0..2 {
+        let output = directory.path().join(format!("output-{run}"));
+        ArchiveService::default()
+            .extract(&archive_path, &output, None)
+            .unwrap();
+        let extracted = fs::read(output.join("large.bin")).unwrap();
+        assert_eq!(extracted.len(), payload.len());
+        digests.push(Sha256::digest(&extracted));
+        assert_eq!(
+            fs::read(output.join("small.bin")).unwrap(),
+            b"tail",
+            "the trailing entry must stay intact after buffered writes"
+        );
+    }
+    assert_eq!(digests[0], expected, "output digest must match the payload");
+    assert_eq!(digests[0], digests[1], "repeated runs must agree");
 }
 
 #[test]
@@ -65,7 +111,7 @@ fn extracts_zip_entries_compressed_with_lzma() {
     )
     .unwrap();
 
-    ArchiveService
+    ArchiveService::default()
         .extract(&archive_path, &output_path, None)
         .unwrap();
     assert_eq!(
@@ -88,11 +134,79 @@ fn rejects_zip_entries_that_escape_the_destination() {
     archive.finish().unwrap();
 
     assert!(
-        ArchiveService
+        ArchiveService::default()
             .extract(&archive_path, &output_path, None)
             .is_err()
     );
     assert!(!directory.path().join("outside.txt").exists());
+}
+
+#[test]
+fn rejects_zip_entries_that_smuggle_ntfs_alternate_data_streams() {
+    let directory = tempdir().unwrap();
+    let archive_path = directory.path().join("ads.zip");
+    let output_path = directory.path().join("output");
+    let file = fs::File::create(&archive_path).unwrap();
+    let mut archive = zip::ZipWriter::new(file);
+    archive
+        .start_file("readme.txt:hidden", SimpleFileOptions::default())
+        .unwrap();
+    std::io::Write::write_all(&mut archive, b"unsafe").unwrap();
+    archive.finish().unwrap();
+
+    let error = ArchiveService::default()
+        .extract(&archive_path, &output_path, None)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("readme.txt:hidden"),
+        "expected the entry name in the error, got {error:#}"
+    );
+    assert!(!output_path.join("readme.txt").exists());
+}
+
+#[test]
+fn rejects_tar_entries_with_reserved_windows_device_names() {
+    let directory = tempdir().unwrap();
+    let archive_path = directory.path().join("reserved.tar.gz");
+    let output_path = directory.path().join("output");
+    let mut tar_bytes = Vec::new();
+    {
+        let mut archive = tar::Builder::new(&mut tar_bytes);
+        let mut header = tar::Header::new_gnu();
+        header.set_path("CON").unwrap();
+        header.set_size(2);
+        header.set_mode(0o644);
+        header.set_cksum();
+        archive.append(&header, b"ok".as_slice()).unwrap();
+        archive.finish().unwrap();
+    }
+    fs::write(&archive_path, gzip(&tar_bytes)).unwrap();
+
+    let error = ArchiveService::default()
+        .extract(&archive_path, &output_path, None)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("CON"),
+        "expected the reserved entry name in the error, got {error:#}"
+    );
+    assert!(!output_path.join("CON").exists());
+}
+
+#[test]
+fn rejects_single_stream_archives_with_reserved_file_names() {
+    let directory = tempdir().unwrap();
+    let archive_path = directory.path().join("nul.gz");
+    let output_path = directory.path().join("output");
+    fs::write(&archive_path, gzip(b"payload")).unwrap();
+
+    let error = ArchiveService::default()
+        .extract(&archive_path, &output_path, None)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("nul"),
+        "expected the reserved stem in the error, got {error:#}"
+    );
+    assert!(!output_path.join("nul").exists());
 }
 
 #[test]
@@ -105,10 +219,12 @@ fn round_trips_multithreaded_7z_archives() {
     fs::create_dir(source.join("empty")).unwrap();
     fs::write(source.join("tool.txt"), "ok").unwrap();
 
-    ArchiveService
+    ArchiveService::default()
         .compress_7z_with_threads(&source, &archive, 2)
         .unwrap();
-    ArchiveService.extract(&archive, &output, None).unwrap();
+    ArchiveService::default()
+        .extract(&archive, &output, None)
+        .unwrap();
     assert_eq!(fs::read_to_string(output.join("tool.txt")).unwrap(), "ok");
     assert!(output.join("empty").is_dir());
 }
@@ -124,12 +240,58 @@ fn extracts_rar5_with_the_rust_backend() {
     )
     .unwrap();
 
-    ArchiveService
+    ArchiveService::default()
         .extract(&archive_path, &output_path, None)
         .unwrap();
     assert_eq!(
         fs::read_to_string(output_path.join("folder/tool.txt")).unwrap(),
         "rust-native-rar"
+    );
+}
+
+#[test]
+fn rejects_rar_link_members_by_default() {
+    let directory = tempdir().unwrap();
+    let archive_path = directory.path().join("links.rar");
+    let output_path = directory.path().join("output");
+    fs::write(
+        &archive_path,
+        stored_rar5_symlink("bin/link", "bin/tool.txt"),
+    )
+    .unwrap();
+
+    let error = ArchiveService::default()
+        .extract_for_tool("demo", false, &archive_path, &output_path, None)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("symbolic link"),
+        "expected link rejection, got {error:#}"
+    );
+    assert!(
+        error.to_string().contains("bin/link"),
+        "expected the member name, got {error:#}"
+    );
+}
+
+#[test]
+fn rejects_rar_links_that_escape_the_extraction_directory_when_opted_in() {
+    let directory = tempdir().unwrap();
+    let archive_path = directory.path().join("escaping.rar");
+    let output_path = directory.path().join("output");
+    fs::write(
+        &archive_path,
+        stored_rar5_symlink("bin/link", "../../outside"),
+    )
+    .unwrap();
+
+    let error = ArchiveService::default()
+        .extract_for_tool("demo", true, &archive_path, &output_path, None)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("escapes the extraction directory"),
+        "expected an escape rejection, got {error:#}"
     );
 }
 
@@ -146,7 +308,9 @@ fn extracts_all_tar_and_single_stream_formats() {
         let archive = directory.path().join(name);
         let output = directory.path().join(format!("output-{name}"));
         fs::write(&archive, contents).unwrap();
-        ArchiveService.extract(&archive, &output, None).unwrap();
+        ArchiveService::default()
+            .extract(&archive, &output, None)
+            .unwrap();
         assert_eq!(
             fs::read_to_string(output.join("bin/tool.txt")).unwrap(),
             "payload",
@@ -161,7 +325,9 @@ fn extracts_all_tar_and_single_stream_formats() {
         let archive = directory.path().join(name);
         let output = directory.path().join(format!("output-{name}"));
         fs::write(&archive, contents).unwrap();
-        ArchiveService.extract(&archive, &output, None).unwrap();
+        ArchiveService::default()
+            .extract(&archive, &output, None)
+            .unwrap();
         assert_eq!(
             fs::read_to_string(output.join("tool.bin")).unwrap(),
             "payload",
@@ -185,9 +351,12 @@ fn recognizes_every_documented_archive_extension_case_insensitively() {
         "tool.gz",
         "tool.xz",
     ] {
-        assert!(ArchiveService.is_supported(Path::new(name)), "{name}");
+        assert!(
+            ArchiveService::default().is_supported(Path::new(name)),
+            "{name}"
+        );
     }
-    assert!(!ArchiveService.is_supported(Path::new("tool.exe")));
+    assert!(!ArchiveService::default().is_supported(Path::new("tool.exe")));
 }
 
 fn tar_fixture() -> Vec<u8> {
@@ -275,4 +444,356 @@ fn encode_vint(mut value: u64) -> Vec<u8> {
             return encoded;
         }
     }
+}
+
+/// Builds a single-member RAR5 archive whose file header carries a Unix
+/// symlink redirection record (extra record type 5, redirection type 1).
+fn stored_rar5_symlink(member: &str, target: &str) -> Vec<u8> {
+    let mut redirection = Vec::new();
+    redirection.extend_from_slice(&encode_vint(1));
+    redirection.extend_from_slice(&encode_vint(0));
+    redirection.extend_from_slice(&encode_vint(target.len() as u64));
+    redirection.extend_from_slice(target.as_bytes());
+
+    // Record size covers the type vint plus the redirection body.
+    let mut extra = Vec::new();
+    extra.extend_from_slice(&encode_vint(redirection.len() as u64 + 1));
+    extra.extend_from_slice(&encode_vint(5));
+    extra.extend_from_slice(&redirection);
+
+    let mut file_body = Vec::new();
+    file_body.extend_from_slice(&encode_vint(0));
+    file_body.extend_from_slice(&encode_vint(0));
+    file_body.extend_from_slice(&encode_vint(0o777));
+    file_body.extend_from_slice(&encode_vint(0));
+    file_body.extend_from_slice(&encode_vint(1));
+    file_body.extend_from_slice(&encode_vint(member.len() as u64));
+    file_body.extend_from_slice(member.as_bytes());
+    file_body.extend_from_slice(&extra);
+
+    let mut archive = b"Rar!\x1a\x07\x01\x00".to_vec();
+    archive.extend_from_slice(&rar5_header(1, 0, &encode_vint(0)));
+    archive.extend_from_slice(&rar5_file_header_with_extra(&file_body, extra.len()));
+    archive.extend_from_slice(&rar5_header(5, 0, &encode_vint(0)));
+    archive
+}
+
+/// RAR5 file header variant whose common flags announce an extra area, so
+/// redirection records survive parsing.
+fn rar5_file_header_with_extra(type_body: &[u8], extra_size: usize) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&encode_vint(2));
+    body.extend_from_slice(&encode_vint(0x0001));
+    body.extend_from_slice(&encode_vint(extra_size as u64));
+    body.extend_from_slice(type_body);
+
+    let size = encode_vint(body.len() as u64);
+    let mut checksummed = size.clone();
+    checksummed.extend_from_slice(&body);
+    let mut header = (crc_fast::crc32_iso_hdlc(&checksummed) as u32)
+        .to_le_bytes()
+        .to_vec();
+    header.extend_from_slice(&checksummed);
+    header
+}
+
+#[test]
+fn rejects_archives_exceeding_the_byte_quota() {
+    let directory = tempdir().unwrap();
+    let output_path = directory.path().join("output");
+    let service = ArchiveService::with_limits(Limits {
+        max_total_bytes: 4,
+        max_entries: 100,
+    });
+
+    let archive_path = directory.path().join("tool.zip");
+    let file = fs::File::create(&archive_path).unwrap();
+    let mut archive = zip::ZipWriter::new(file);
+    archive
+        .start_file("tool.txt", SimpleFileOptions::default())
+        .unwrap();
+    std::io::Write::write_all(&mut archive, b"0123456789").unwrap();
+    archive.finish().unwrap();
+    let error = service
+        .extract_for_tool("demo", false, &archive_path, &output_path, None)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("tool demo"),
+        "expected tool attribution, got {error:#}"
+    );
+    assert!(
+        error.to_string().contains("max_total_bytes 4"),
+        "expected the quota limit, got {error:#}"
+    );
+
+    let single = directory.path().join("tool.bin.gz");
+    fs::write(&single, gzip(b"0123456789")).unwrap();
+    assert!(
+        service
+            .extract_for_tool("demo", false, &single, &output_path, None)
+            .is_err()
+    );
+}
+
+#[test]
+fn rejects_archives_exceeding_the_entry_quota() {
+    let directory = tempdir().unwrap();
+    let archive_path = directory.path().join("tool.zip");
+    let output_path = directory.path().join("output");
+    let file = fs::File::create(&archive_path).unwrap();
+    let mut archive = zip::ZipWriter::new(file);
+    for name in ["a.txt", "b.txt"] {
+        archive
+            .start_file(name, SimpleFileOptions::default())
+            .unwrap();
+        std::io::Write::write_all(&mut archive, b"ok").unwrap();
+    }
+    archive.finish().unwrap();
+
+    let service = ArchiveService::with_limits(Limits {
+        max_total_bytes: 1024,
+        max_entries: 1,
+    });
+    let error = service
+        .extract_for_tool("demo", false, &archive_path, &output_path, None)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("max_entries 1"),
+        "expected the entry quota, got {error:#}"
+    );
+}
+
+#[test]
+fn interrupts_zip_entries_whose_real_output_exceeds_the_quota() {
+    let directory = tempdir().unwrap();
+    let archive_path = directory.path().join("lying.zip");
+    let output_path = directory.path().join("output");
+
+    // Deflate stream of 64 KiB of zeros while both ZIP headers declare a
+    // 4-byte uncompressed size, so only the output-side ledger can catch it.
+    let payload = vec![0_u8; 64 * 1024];
+    let mut deflater =
+        flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    deflater.write_all(&payload).unwrap();
+    let compressed = deflater.finish().unwrap();
+    let crc = crc_fast::crc32_iso_hdlc(&payload) as u32;
+    fs::write(
+        &archive_path,
+        build_lying_deflate_zip("tool.txt", &compressed, crc, 4),
+    )
+    .unwrap();
+
+    let service = ArchiveService::with_limits(Limits {
+        max_total_bytes: 16 * 1024,
+        max_entries: 100,
+    });
+    let error = service
+        .extract_for_tool("demo", false, &archive_path, &output_path, None)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("max_total_bytes 16384"),
+        "expected the output quota, got {error:#}"
+    );
+    let written = fs::metadata(output_path.join("tool.txt"))
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    assert!(
+        written <= 16 * 1024,
+        "the interrupted entry wrote {written} bytes past the quota"
+    );
+}
+
+/// Builds a stored ZIP whose local and central headers both declare the
+/// (lying) uncompressed size while carrying a larger Deflate payload.
+fn build_lying_deflate_zip(name: &str, compressed: &[u8], crc: u32, declared_size: u32) -> Vec<u8> {
+    let name = name.as_bytes();
+    let mut zip = Vec::new();
+    let local = [
+        &0x04034b50_u32.to_le_bytes()[..],
+        &20_u16.to_le_bytes(),
+        &0_u16.to_le_bytes(),
+        &8_u16.to_le_bytes(),
+        &0_u16.to_le_bytes(),
+        &0_u16.to_le_bytes(),
+        &crc.to_le_bytes(),
+        &(compressed.len() as u32).to_le_bytes(),
+        &declared_size.to_le_bytes(),
+        &(name.len() as u16).to_le_bytes(),
+        &0_u16.to_le_bytes(),
+    ]
+    .concat();
+    zip.extend_from_slice(&local);
+    zip.extend_from_slice(name);
+    zip.extend_from_slice(compressed);
+    let data_offset = (local.len() + name.len() + compressed.len()) as u32;
+    let central = [
+        &0x02014b50_u32.to_le_bytes()[..],
+        &0x0314_u16.to_le_bytes(),
+        &20_u16.to_le_bytes(),
+        &0_u16.to_le_bytes(),
+        &8_u16.to_le_bytes(),
+        &0_u16.to_le_bytes(),
+        &0x21_u16.to_le_bytes(),
+        &crc.to_le_bytes(),
+        &(compressed.len() as u32).to_le_bytes(),
+        &declared_size.to_le_bytes(),
+        &(name.len() as u16).to_le_bytes(),
+        &0_u16.to_le_bytes(),
+        &0_u16.to_le_bytes(),
+        &0_u16.to_le_bytes(),
+        &0_u16.to_le_bytes(),
+        &0x81a4_u32.to_le_bytes(),
+        &0_u32.to_le_bytes(),
+    ]
+    .concat();
+    zip.extend_from_slice(&central);
+    zip.extend_from_slice(name);
+    let end = [
+        &0x06054b50_u32.to_le_bytes()[..],
+        &0_u16.to_le_bytes(),
+        &0_u16.to_le_bytes(),
+        &1_u16.to_le_bytes(),
+        &1_u16.to_le_bytes(),
+        &((46 + name.len()) as u32).to_le_bytes(),
+        &data_offset.to_le_bytes(),
+        &0_u16.to_le_bytes(),
+    ]
+    .concat();
+    zip.extend_from_slice(&end);
+    zip
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_tar_symlinks_and_hardlinks_by_default() {
+    let directory = tempdir().unwrap();
+    let symlink_archive = directory.path().join("symlink.tar.gz");
+    fs::write(
+        &symlink_archive,
+        gzip(&tar_link_fixture(tar::EntryType::Symlink)),
+    );
+    let hardlink_archive = directory.path().join("hardlink.tar.gz");
+    fs::write(
+        &hardlink_archive,
+        gzip(&tar_link_fixture(tar::EntryType::Link)),
+    );
+
+    for (archive, kind) in [
+        (&symlink_archive, "symbolic link"),
+        (&hardlink_archive, "hard link"),
+    ] {
+        let output = directory
+            .path()
+            .join(format!("output-{}", archive.display()));
+        let error = ArchiveService::default()
+            .extract_for_tool("demo", false, archive, &output, None)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains(kind),
+            "expected {kind} rejection, got {error:#}"
+        );
+        assert!(!output.join("bin/link").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn allows_tar_links_only_when_opted_in_and_bounded() {
+    let directory = tempdir().unwrap();
+    let archive_path = directory.path().join("links.tar.gz");
+    fs::write(
+        &archive_path,
+        gzip(&tar_link_fixture(tar::EntryType::Symlink)),
+    );
+    let output = directory.path().join("output");
+    ArchiveService::default()
+        .extract_for_tool("demo", true, &archive_path, &output, None)
+        .unwrap();
+    assert!(
+        fs::symlink_metadata(output.join("bin/link"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+
+    let escaping = directory.path().join("escaping.tar.gz");
+    fs::write(
+        &escaping,
+        gzip(&tar_link_with_target(tar::EntryType::Symlink, "../outside")),
+    );
+    let error = ArchiveService::default()
+        .extract_for_tool(
+            "demo",
+            true,
+            &escaping,
+            &directory.path().join("escaping"),
+            None,
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("escapes the extraction directory"),
+        "expected an escape rejection, got {error:#}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn strips_privilege_bits_from_zip_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempdir().unwrap();
+    let archive_path = directory.path().join("setuid.zip");
+    let output_path = directory.path().join("output");
+    let file = fs::File::create(&archive_path).unwrap();
+    let mut archive = zip::ZipWriter::new(file);
+    archive
+        .start_file(
+            "tool",
+            SimpleFileOptions::default().unix_permissions(0o4755),
+        )
+        .unwrap();
+    std::io::Write::write_all(&mut archive, b"ok").unwrap();
+    archive.finish().unwrap();
+
+    ArchiveService::default()
+        .extract(&archive_path, &output_path, None)
+        .unwrap();
+    let mode = fs::metadata(output_path.join("tool"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o7777, 0o755);
+}
+
+#[cfg(unix)]
+fn tar_link_fixture(entry_type: tar::EntryType) -> Vec<u8> {
+    tar_link_with_target(entry_type, "tool.txt")
+}
+
+#[cfg(unix)]
+fn tar_link_with_target(entry_type: tar::EntryType, target: &str) -> Vec<u8> {
+    let mut output = Vec::new();
+    {
+        let mut archive = tar::Builder::new(&mut output);
+        let contents = b"payload";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("bin/tool.txt").unwrap();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        archive.append(&header, contents.as_slice()).unwrap();
+
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(entry_type);
+        header.set_path("bin/link").unwrap();
+        header.set_size(0);
+        header.set_mode(0o644);
+        header.set_link_name(target).unwrap();
+        header.set_cksum();
+        archive.append(&header, std::io::empty()).unwrap();
+        archive.finish().unwrap();
+    }
+    output
 }

@@ -13,8 +13,9 @@ use universal_tool_updater::app;
 use universal_tool_updater::archive::ArchiveService;
 use universal_tool_updater::cli::{Cli, Command};
 use universal_tool_updater::config::model::{
-    ArtifactConfig, DefaultsConfig, HookAction, HookConfig, InstallConfig, ManifestFile,
-    NetworkConfig, OutputMode, PathConfig, ReleaseConfig, SCHEMA_VERSION, ToolConfig, ToolFile,
+    ArtifactConfig, DefaultsConfig, ExtractionLimits, HookAction, HookConfig, InstallConfig,
+    ManifestFile, NetworkConfig, OutputMode, PathConfig, ReleaseConfig, SCHEMA_VERSION, ToolConfig,
+    ToolFile,
 };
 use zip::write::SimpleFileOptions;
 
@@ -67,6 +68,7 @@ fn resolves_downloads_extracts_installs_and_records_state() {
             },
             artifacts: vec![ArtifactConfig::DirectUrl {
                 url: format!("http://{address}/demo.zip"),
+                sha256: None,
             }],
             install: InstallConfig {
                 destination: PathBuf::from("Demo"),
@@ -103,6 +105,8 @@ fn resolves_downloads_extracts_installs_and_records_state() {
             ..NetworkConfig::default()
         },
         defaults,
+        extraction_limits: ExtractionLimits::default(),
+        allow_insecure_transports: true,
     };
     let manifest_path = config_dir.join("manifest.yaml");
     fs::write(&manifest_path, yaml_serde::to_string(&manifest).unwrap()).unwrap();
@@ -128,7 +132,7 @@ fn resolves_downloads_extracts_installs_and_records_state() {
     let saved_archive = toolkit.join("Demo/demo-1.2.3.7z");
     assert!(saved_archive.is_file());
     let extracted = workspace.path().join("saved-archive");
-    ArchiveService
+    ArchiveService::default()
         .extract(&saved_archive, &extracted, None)
         .unwrap();
     assert_eq!(
@@ -210,6 +214,7 @@ fn runs_complete_tool_updates_in_parallel() {
                 },
                 artifacts: vec![ArtifactConfig::DirectUrl {
                     url: format!("http://{address}/{id}.zip"),
+                    sha256: None,
                 }],
                 install: InstallConfig {
                     destination: PathBuf::from(id),
@@ -242,6 +247,8 @@ fn runs_complete_tool_updates_in_parallel() {
             ..NetworkConfig::default()
         },
         defaults,
+        extraction_limits: ExtractionLimits::default(),
+        allow_insecure_transports: true,
     };
     let manifest_path = config_dir.join("manifest.yaml");
     fs::write(&manifest_path, yaml_serde::to_string(&manifest).unwrap()).unwrap();
@@ -278,6 +285,75 @@ fn runs_complete_tool_updates_in_parallel() {
     assert_eq!(update_entries.len(), 1);
     assert_eq!(update_entries[0].path(), staging);
     assert!(fs::read_dir(&staging).unwrap().next().is_none());
+}
+
+#[test]
+fn skips_manual_placeholders_instead_of_updating() {
+    let workspace = tempdir().unwrap();
+    let toolkit = workspace.path().join("Toolkit");
+    let config_dir = workspace.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    let mut tools = BTreeMap::new();
+    tools.insert(
+        "ida-pro".to_owned(),
+        ToolConfig {
+            name: Some("IDA Pro".to_owned()),
+            enabled: true,
+            release: ReleaseConfig::Manual {},
+            artifacts: Vec::new(),
+            install: InstallConfig {
+                destination: PathBuf::from("Reverse/Decompiler/IDA Pro"),
+                ..InstallConfig::default()
+            },
+            hooks: HookConfig::default(),
+        },
+    );
+    fs::write(
+        config_dir.join("tools.yaml"),
+        yaml_serde::to_string(&ToolFile { tools }).unwrap(),
+    )
+    .unwrap();
+    let manifest = ManifestFile {
+        schema_version: SCHEMA_VERSION,
+        include: vec!["tools.yaml".to_owned()],
+        paths: PathConfig {
+            toolkit_root: toolkit.clone(),
+            downloads: workspace.path().join("updates"),
+            staging: None,
+            state: PathBuf::from(".updater/state.yaml"),
+        },
+        network: NetworkConfig {
+            progress: false,
+            ..NetworkConfig::default()
+        },
+        defaults: DefaultsConfig::default(),
+        extraction_limits: ExtractionLimits::default(),
+        allow_insecure_transports: false,
+    };
+    let manifest_path = config_dir.join("manifest.yaml");
+    fs::write(&manifest_path, yaml_serde::to_string(&manifest).unwrap()).unwrap();
+
+    // No HTTP server is started: a manual tool must be skipped before resolution.
+    app::run(Cli {
+        manifest: Some(manifest_path),
+        profiles: None,
+        verbose: false,
+        log_dir: None,
+        profile: Vec::new(),
+        command: Some(Command::Update {
+            tools: vec!["ida-pro".to_owned()],
+            force: false,
+            create_missing: false,
+            dry_run: false,
+            no_progress: true,
+            jobs: None,
+        }),
+    })
+    .unwrap();
+
+    assert!(!toolkit.join("Reverse").exists());
+    assert!(!toolkit.join(".updater/state.yaml").exists());
 }
 
 fn zip_fixture() -> Vec<u8> {

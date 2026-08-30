@@ -2,13 +2,15 @@ use std::fs;
 
 use tempfile::tempdir;
 use universal_tool_updater::config;
-use universal_tool_updater::config::model::{ManifestFile, OutputMode};
+use universal_tool_updater::config::model::{
+    EnvironmentMode, ExtractionLimits, HookAction, ManifestFile, OutputMode, ReleaseConfig,
+};
 
 #[test]
 fn reads_parallel_jobs_from_the_manifest() {
     let manifest: ManifestFile = yaml_serde::from_str(
         r#"
-schema_version: 5
+schema_version: 6
 include: [tools.yaml]
 paths:
   toolkit_root: ~/Tools/Toolkit
@@ -27,7 +29,7 @@ fn rejects_zero_parallel_jobs_in_the_manifest() {
     fs::write(
         directory.path().join("manifest.yaml"),
         r#"
-schema_version: 5
+schema_version: 6
 include: [tools.yaml]
 paths:
   toolkit_root: ~/Tools/Toolkit
@@ -50,7 +52,7 @@ fn rejects_invalid_manifest_parameter_values() {
     for (manifest, expected) in [
         (
             r#"
-schema_version: 5
+schema_version: 6
 include: [tools.yaml]
 paths:
   toolkit_root: ''
@@ -59,7 +61,7 @@ paths:
         ),
         (
             r#"
-schema_version: 5
+schema_version: 6
 include: [tools.yaml]
 paths:
   toolkit_root: Toolkit
@@ -69,7 +71,7 @@ paths:
         ),
         (
             r#"
-schema_version: 5
+schema_version: 6
 include: [tools.yaml]
 paths:
   toolkit_root: Toolkit
@@ -80,7 +82,7 @@ network:
         ),
         (
             r#"
-schema_version: 5
+schema_version: 6
 include: [tools.yaml]
 paths:
   toolkit_root: Toolkit
@@ -91,7 +93,7 @@ network:
         ),
         (
             r#"
-schema_version: 5
+schema_version: 6
 include: [tools.yaml]
 paths:
   toolkit_root: Toolkit
@@ -102,7 +104,7 @@ network:
         ),
         (
             r#"
-schema_version: 5
+schema_version: 6
 include: [tools.yaml]
 paths:
   toolkit_root: Toolkit
@@ -114,7 +116,7 @@ defaults:
         ),
         (
             r#"
-schema_version: 5
+schema_version: 6
 include: [tools.yaml]
 paths:
   toolkit_root: Toolkit
@@ -138,7 +140,7 @@ fn rejects_state_nested_inside_the_staging_directory() {
     let state = yaml_path(&directory.path().join("transactions/state.yaml"));
     let manifest = format!(
         r#"
-schema_version: 5
+schema_version: 6
 include: [tools.yaml]
 paths:
   toolkit_root: '{toolkit}'
@@ -154,7 +156,7 @@ paths:
 fn uses_save_for_global_output_mode_and_rejects_the_legacy_alias() {
     let manifest: ManifestFile = yaml_serde::from_str(
         r#"
-schema_version: 5
+schema_version: 6
 include: [tools.yaml]
 paths:
   toolkit_root: ~/Tools/Toolkit
@@ -171,7 +173,7 @@ defaults:
     assert!(!encoded.contains("output:"));
 
     let legacy = r#"
-schema_version: 5
+schema_version: 6
 include: [tools.yaml]
 paths:
   toolkit_root: ~/Tools/Toolkit
@@ -188,7 +190,7 @@ fn derives_the_release_directory_from_copy_input() {
     fs::write(
         directory.path().join("manifest.yaml"),
         r#"
-schema_version: 5
+schema_version: 6
 include: [tools.yaml]
 paths:
   toolkit_root: Toolkit
@@ -228,7 +230,7 @@ fn derives_profiles_only_from_manifest_includes() {
     fs::write(
         directory.path().join("manifest.yaml"),
         r#"
-schema_version: 5
+schema_version: 6
 include: [web.yaml]
 paths:
   toolkit_root: Toolkit
@@ -260,12 +262,69 @@ tools:
 }
 
 #[test]
+fn parses_the_github_prerelease_opt_in_and_defaults_to_false() {
+    let directory = tempdir().unwrap();
+    fs::write(
+        directory.path().join("manifest.yaml"),
+        r#"
+schema_version: 6
+include: [tools.yaml]
+paths:
+  toolkit_root: ~/Tools/Toolkit
+"#,
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("tools.yaml"),
+        r#"
+tools:
+  stable:
+    release:
+      type: github
+      repository: owner/stable
+    artifacts:
+      - type: github-asset
+        pattern: stable.zip
+    install:
+      destination: Tools/Stable
+  cutting-edge:
+    release:
+      type: github
+      repository: owner/cutting-edge
+      allow_prereleases: true
+    artifacts:
+      - type: github-asset
+        pattern: edge.zip
+    install:
+      destination: Tools/CuttingEdge
+"#,
+    )
+    .unwrap();
+
+    let loaded = config::load(&directory.path().join("manifest.yaml")).unwrap();
+    assert!(matches!(
+        loaded.tools["stable"].release,
+        ReleaseConfig::Github {
+            allow_prereleases: false,
+            ..
+        }
+    ));
+    assert!(matches!(
+        loaded.tools["cutting-edge"].release,
+        ReleaseConfig::Github {
+            allow_prereleases: true,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn resolves_an_explicit_staging_directory_from_the_updater_directory() {
     let directory = tempdir().unwrap();
     fs::write(
         directory.path().join("manifest.yaml"),
         r#"
-schema_version: 5
+schema_version: 6
 include: [tools.yaml]
 paths:
   toolkit_root: Toolkit
@@ -325,6 +384,97 @@ tools:
 "#,
         "must not end with 'release'",
     );
+}
+
+#[test]
+fn validates_github_artifact_sha256_pins_and_templates() {
+    assert_invalid_tool(
+        r#"
+tools:
+  demo:
+    release:
+      type: github
+      repository: owner/demo
+    artifacts:
+      - type: github-source
+        format: tar.gz
+        sha256: '0123'
+    install:
+      destination: Demo
+"#,
+        "sha256 must be 64 hexadecimal characters",
+    );
+    assert_invalid_tool(
+        r#"
+tools:
+  demo:
+    release:
+      type: github
+      repository: owner/demo
+    artifacts:
+      - type: github-assets
+        pattern: '^tool-.+\.zip$'
+        sha256: '{version}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    install:
+      destination: Demo
+"#,
+        "unsupported placeholder {version}",
+    );
+    assert_invalid_tool(
+        r#"
+tools:
+  demo:
+    release:
+      type: github
+      repository: owner/demo
+    artifacts:
+      - type: github-asset
+        pattern: '^tool\.zip$'
+        sha256: 'zz{version}'
+    install:
+      destination: Demo
+"#,
+        "hexadecimal characters outside the {version} placeholder",
+    );
+
+    // github-asset accepts a {version} template; github-assets accepts static pins.
+    let directory = tempdir().unwrap();
+    fs::write(
+        directory.path().join("manifest.yaml"),
+        r#"
+schema_version: 6
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+"#,
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("tools.yaml"),
+        r#"
+tools:
+  demo:
+    release:
+      type: github
+      repository: owner/demo
+    artifacts:
+      - type: github-asset
+        pattern: '^tool-v[^/]+\.zip$'
+        sha256: 'a9993e364706816aba3e25717850c26c9cd0d89d{version}'
+      - type: github-assets
+        pattern: '^tool-v[^/]+-windows\.zip$'
+        sha256: a9993e364706816aba3e25717850c26c9cd0d89dabcdef0123456789abcdef01
+      - type: github-source
+        format: tar.gz
+        sha256: 2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae
+    install:
+      destination: Demo
+"#,
+    )
+    .unwrap();
+
+    let loaded = config::load(&directory.path().join("manifest.yaml")).unwrap();
+    assert_eq!(loaded.tools.len(), 1);
 }
 
 #[test]
@@ -415,7 +565,7 @@ tools:
     install:
       destination: Demo
 "#,
-        "must use HTTP or HTTPS",
+        "must use HTTPS",
     );
     assert_invalid_tool(
         r#"
@@ -578,7 +728,7 @@ fn rejects_empty_profiles_and_runtime_path_conflicts() {
     assert_invalid_tool("tools: {}\n", "tools must not be empty");
     assert_invalid_tool_with_manifest(
         r#"
-schema_version: 5
+schema_version: 6
 include: [tools.yaml]
 paths:
   toolkit_root: ~/Tools/Toolkit
@@ -601,7 +751,7 @@ tools:
     );
     assert_invalid_tool_with_manifest(
         r#"
-schema_version: 5
+schema_version: 6
 include: [tools.yaml]
 paths:
   toolkit_root: ~/Tools/Toolkit
@@ -625,7 +775,7 @@ tools:
     );
     assert_invalid_tool_with_manifest(
         r#"
-schema_version: 5
+schema_version: 6
 include: [tools.yaml]
 paths:
   toolkit_root: ~/Tools/Toolkit
@@ -645,6 +795,104 @@ tools:
       input: copy
 "#,
         "version marker",
+    );
+}
+
+#[test]
+fn accepts_manual_release_placeholders_without_artifacts() {
+    let directory = tempdir().unwrap();
+    fs::write(
+        directory.path().join("manifest.yaml"),
+        r#"
+schema_version: 6
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+"#,
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("tools.yaml"),
+        r#"
+tools:
+  ida-pro:
+    name: IDA Pro
+    release:
+      type: manual
+    artifacts: []
+    install:
+      destination: Reverse/Decompiler/IDA Pro
+"#,
+    )
+    .unwrap();
+
+    let loaded = config::load(&directory.path().join("manifest.yaml")).unwrap();
+
+    assert_eq!(loaded.tools.len(), 1);
+    assert!(matches!(
+        loaded.tools["ida-pro"].release,
+        ReleaseConfig::Manual {}
+    ));
+    assert!(loaded.tools["ida-pro"].artifacts.is_empty());
+}
+
+#[test]
+fn rejects_artifacts_on_manual_release_placeholders() {
+    assert_invalid_tool(
+        r#"
+tools:
+  demo:
+    release:
+      type: manual
+    artifacts:
+      - type: direct-url
+        url: https://example.com/demo.zip
+    install:
+      destination: Demo
+"#,
+        "manual tools are not auto-updated and must not configure artifacts",
+    );
+}
+
+#[test]
+fn rejects_unknown_fields_on_manual_release_placeholders() {
+    assert_invalid_tool(
+        r#"
+tools:
+  demo:
+    release:
+      type: manual
+      repository: owner/demo
+    artifacts: []
+    install:
+      destination: Demo
+"#,
+        "unknown field",
+    );
+}
+
+#[test]
+fn rejects_overlapping_destinations_between_manual_and_managed_tools() {
+    assert_invalid_tool(
+        r#"
+tools:
+  alpha:
+    release:
+      type: github
+      repository: owner/alpha
+    artifacts:
+      - type: github-asset
+        pattern: alpha
+    install:
+      destination: Shared
+  placeholder:
+    release:
+      type: manual
+    artifacts: []
+    install:
+      destination: shared
+"#,
+        "overlapping destinations",
     );
 }
 
@@ -814,7 +1062,7 @@ tools:
 fn rejects_reserved_paths_that_collide_with_transaction_backups() {
     assert_invalid_tool_with_manifest(
         r#"
-schema_version: 5
+schema_version: 6
 include: [tools.yaml]
 paths:
   toolkit_root: Toolkit
@@ -869,7 +1117,7 @@ tools:
 fn assert_invalid_tool(tool_file: &str, expected: &str) {
     assert_invalid_tool_with_manifest(
         r#"
-schema_version: 5
+schema_version: 6
 include:
   - tools.yaml
 paths:
@@ -905,4 +1153,322 @@ fn assert_invalid_tool_with_manifest(manifest: &str, tool_file: &str, expected: 
         error.to_string().contains(expected),
         "expected {expected:?}, got {error:#}"
     );
+}
+
+#[test]
+fn rejects_plain_http_urls_by_default() {
+    assert_invalid_tool(
+        r#"
+tools:
+  demo:
+    release:
+      type: http
+      url: http://example.com/demo.zip
+      version_headers: [etag]
+    artifacts:
+      - type: release-url
+    install:
+      destination: Demo
+"#,
+        "must use HTTPS",
+    );
+    assert_invalid_tool(
+        r#"
+tools:
+  demo:
+    release:
+      type: web
+      url: https://example.com/releases
+      version_pattern: 'version=(.+)'
+    artifacts:
+      - type: direct-url
+        url: http://example.com/demo.zip
+    install:
+      destination: Demo
+"#,
+        "must use HTTPS",
+    );
+}
+
+#[test]
+fn allows_plain_http_urls_only_when_insecure_transports_are_opted_in() {
+    let directory = tempdir().unwrap();
+    fs::write(
+        directory.path().join("manifest.yaml"),
+        r#"
+schema_version: 6
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+allow_insecure_transports: true
+"#,
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("tools.yaml"),
+        r#"
+tools:
+  demo:
+    release:
+      type: http
+      url: http://example.com/demo.zip
+      version_headers: [etag]
+    artifacts:
+      - type: release-url
+      - type: direct-url
+        url: http://mirror.example.com/demo.zip
+    install:
+      destination: Demo
+"#,
+    )
+    .unwrap();
+
+    let loaded = config::load(&directory.path().join("manifest.yaml")).unwrap();
+    assert_eq!(loaded.tools.len(), 1);
+}
+
+#[test]
+fn validates_artifact_sha256_digests_and_templates() {
+    assert_invalid_tool(
+        r#"
+tools:
+  demo:
+    release:
+      type: web
+      url: https://example.com/releases
+      version_pattern: 'version=(.+)'
+    artifacts:
+      - type: direct-url
+        url: https://example.com/demo.zip
+        sha256: '0123'
+    install:
+      destination: Demo
+"#,
+        "sha256 must be 64 hexadecimal characters",
+    );
+    assert_invalid_tool(
+        r#"
+tools:
+  demo:
+    release:
+      type: web
+      url: https://example.com/releases
+      version_pattern: 'version=(.+)'
+    artifacts:
+      - type: direct-url
+        url: https://example.com/demo.zip
+        sha256: '{version}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    install:
+      destination: Demo
+"#,
+        "unsupported placeholder {version}",
+    );
+    assert_invalid_tool(
+        r#"
+tools:
+  demo:
+    release:
+      type: web
+      url: https://example.com/releases
+      version_pattern: 'version=(.+)'
+    artifacts:
+      - type: url-template
+        url: 'https://example.com/{version}/demo.zip'
+        sha256: 'zz{version}'
+    install:
+      destination: Demo
+"#,
+        "hexadecimal characters outside the {version} placeholder",
+    );
+
+    let directory = tempdir().unwrap();
+    fs::write(
+        directory.path().join("manifest.yaml"),
+        r#"
+schema_version: 6
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+"#,
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("tools.yaml"),
+        r#"
+tools:
+  demo:
+    release:
+      type: web
+      url: https://example.com/releases
+      version_pattern: 'version=(.+)'
+    artifacts:
+      - type: url-template
+        url: 'https://example.com/{version}/demo.zip'
+        sha256: 'a9993e364706816aba3e25717850c26c9cd0d89d{version}'
+    install:
+      destination: Demo
+"#,
+    )
+    .unwrap();
+
+    let loaded = config::load(&directory.path().join("manifest.yaml")).unwrap();
+    assert_eq!(loaded.tools.len(), 1);
+}
+
+#[test]
+fn rejects_manifests_from_older_schema_versions() {
+    assert_invalid_manifest(
+        r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: ~/Tools/Toolkit
+"#,
+        "unsupported schema version 5; expected 6",
+    );
+}
+
+#[test]
+fn parses_extraction_limits_and_defaults_to_the_safe_baseline() {
+    let manifest: ManifestFile = yaml_serde::from_str(
+        r#"
+schema_version: 6
+include: [tools.yaml]
+paths:
+  toolkit_root: ~/Tools/Toolkit
+extraction_limits:
+  max_total_bytes: 17179869184
+  max_entries: 50000
+"#,
+    )
+    .unwrap();
+    assert_eq!(manifest.extraction_limits.max_total_bytes, 17179869184);
+    assert_eq!(manifest.extraction_limits.max_entries, 50000);
+
+    let default: ManifestFile = yaml_serde::from_str(
+        r#"
+schema_version: 6
+include: [tools.yaml]
+paths:
+  toolkit_root: ~/Tools/Toolkit
+"#,
+    )
+    .unwrap();
+    assert_eq!(default.extraction_limits, ExtractionLimits::default());
+    assert_eq!(default.extraction_limits.max_total_bytes, 8589934592);
+    assert_eq!(default.extraction_limits.max_entries, 100_000);
+
+    let encoded = yaml_serde::to_string(&default).unwrap();
+    assert!(!encoded.contains("extraction_limits"));
+}
+
+#[test]
+fn rejects_zero_extraction_limits() {
+    assert_invalid_manifest(
+        r#"
+schema_version: 6
+include: [tools.yaml]
+paths:
+  toolkit_root: ~/Tools/Toolkit
+extraction_limits:
+  max_total_bytes: 0
+"#,
+        "extraction_limits.max_total_bytes must be greater than zero",
+    );
+    assert_invalid_manifest(
+        r#"
+schema_version: 6
+include: [tools.yaml]
+paths:
+  toolkit_root: ~/Tools/Toolkit
+extraction_limits:
+  max_entries: 0
+"#,
+        "extraction_limits.max_entries must be greater than zero",
+    );
+}
+
+#[test]
+fn parses_the_python_environment_mode_and_defaults_to_minimal() {
+    let inherit: HookAction = yaml_serde::from_str(
+        r#"
+type: python
+script: scripts/demo.py
+environment_mode: inherit
+"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        inherit,
+        HookAction::Python {
+            environment_mode: EnvironmentMode::Inherit,
+            ..
+        }
+    ));
+
+    let minimal: HookAction = yaml_serde::from_str(
+        r#"
+type: python
+script: scripts/demo.py
+"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        minimal,
+        HookAction::Python {
+            environment_mode: EnvironmentMode::Minimal,
+            ..
+        }
+    ));
+    assert!(
+        yaml_serde::from_str::<HookAction>(
+            "type: python\nscript: scripts/demo.py\nenvironment_mode: everything\n"
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn parses_the_install_symlink_opt_in_and_defaults_to_false() {
+    let directory = tempdir().unwrap();
+    fs::write(
+        directory.path().join("manifest.yaml"),
+        r#"
+schema_version: 6
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+"#,
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("tools.yaml"),
+        r#"
+tools:
+  plain:
+    release:
+      type: github
+      repository: owner/plain
+    artifacts:
+      - type: github-asset
+        pattern: plain.tar.gz
+    install:
+      destination: Plain
+  linked:
+    release:
+      type: github
+      repository: owner/linked
+    artifacts:
+      - type: github-asset
+        pattern: linked.tar.gz
+    install:
+      destination: Linked
+      allow_symlinks_in_archive: true
+"#,
+    )
+    .unwrap();
+
+    let loaded = config::load(&directory.path().join("manifest.yaml")).unwrap();
+    assert!(!loaded.tools["plain"].install.allow_symlinks_in_archive);
+    assert!(loaded.tools["linked"].install.allow_symlinks_in_archive);
 }

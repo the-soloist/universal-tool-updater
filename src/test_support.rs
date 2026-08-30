@@ -13,6 +13,7 @@ pub(crate) fn tool(id: &str, destination: impl Into<PathBuf>) -> Tool {
         release: ReleaseConfig::Github {
             repository: format!("owner/{id}"),
             ignore_versions: Vec::new(),
+            allow_prereleases: false,
         },
         artifacts: Vec::new(),
         install: InstallSpec {
@@ -26,6 +27,7 @@ pub(crate) fn tool(id: &str, destination: impl Into<PathBuf>) -> Tool {
             archive_password: None,
             executable: Vec::new(),
             symlinks: Vec::new(),
+            allow_symlinks_in_archive: false,
         },
         hooks: HookConfig::default(),
     }
