@@ -29,7 +29,7 @@ fn select_home(
 
 #[cfg(not(windows))]
 fn select_home(
-    userprofile: Option<std::ffi::OsString>,
+    _userprofile: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
 ) -> Option<std::ffi::OsString> {
     home

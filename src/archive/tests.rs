@@ -707,12 +707,14 @@ fn rejects_tar_symlinks_and_hardlinks_by_default() {
     fs::write(
         &symlink_archive,
         gzip(&tar_link_fixture(tar::EntryType::Symlink)),
-    );
+    )
+    .unwrap();
     let hardlink_archive = directory.path().join("hardlink.tar.gz");
     fs::write(
         &hardlink_archive,
         gzip(&tar_link_fixture(tar::EntryType::Link)),
-    );
+    )
+    .unwrap();
 
     for (archive, kind) in [
         (&symlink_archive, "symbolic link"),
@@ -740,7 +742,8 @@ fn allows_tar_links_only_when_opted_in_and_bounded() {
     fs::write(
         &archive_path,
         gzip(&tar_link_fixture(tar::EntryType::Symlink)),
-    );
+    )
+    .unwrap();
     let output = directory.path().join("output");
     ArchiveService::default()
         .extract_for_tool("demo", true, &archive_path, &output, None)
@@ -756,7 +759,8 @@ fn allows_tar_links_only_when_opted_in_and_bounded() {
     fs::write(
         &escaping,
         gzip(&tar_link_with_target(tar::EntryType::Symlink, "../outside")),
-    );
+    )
+    .unwrap();
     let error = ArchiveService::default()
         .extract_for_tool(
             "demo",
