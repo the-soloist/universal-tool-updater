@@ -3,7 +3,7 @@
 # 将 manifest.yaml 与 profile.yaml 一起复制到同一个 profiles 目录后，运行：
 #   updater --profiles /path/to/profiles check
 
-schema_version: 6
+schema_version: 5
 
 # 只加载这里明确列出的 profile 文件；路径相对于本文件所在目录。
 include:

@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::thread;
 use std::time::Duration;
@@ -6,10 +7,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use console::Term;
 use indicatif::{ProgressBar, ProgressStyle};
+use reqwest::StatusCode;
 use reqwest::blocking::{Client, Response};
-use sha2::{Digest, Sha256};
 
-use crate::downloader::transfer::{self, TransferFailure};
+const TRANSFER_ATTEMPTS: usize = 3;
 
 pub(super) fn http_client() -> Result<Client> {
     Client::builder()
@@ -37,14 +38,14 @@ pub(super) fn download(
     destination: &Path,
     filename: &str,
 ) -> Result<()> {
-    tracing::info!(url = %transfer::redact_url(url), filename, path = %destination.display(), "self-update download started");
+    tracing::info!(url, filename, path = %destination.display(), "self-update download started");
     println!("Downloading {filename}");
-    for attempt in 1..=transfer::ATTEMPTS {
+    for attempt in 1..=TRANSFER_ATTEMPTS {
         let response = match client.get(url).send() {
             Ok(response) => response,
-            Err(error) if attempt < transfer::ATTEMPTS => {
+            Err(error) if attempt < TRANSFER_ATTEMPTS => {
                 tracing::warn!(attempt, error = %error, "self-update request failed; retrying");
-                thread::sleep(transfer::backoff_delay(attempt));
+                thread::sleep(Duration::from_millis(500 * attempt as u64));
                 continue;
             }
             Err(error) => {
@@ -54,25 +55,25 @@ pub(super) fn download(
         };
         let status = response.status();
         if !status.is_success() {
-            if attempt < transfer::ATTEMPTS && transfer::is_retryable_status(Some(status)) {
+            if attempt < TRANSFER_ATTEMPTS && retryable_status(status) {
                 tracing::warn!(attempt, %status, "self-update server error; retrying");
-                thread::sleep(transfer::backoff_delay(attempt));
+                thread::sleep(Duration::from_millis(500 * attempt as u64));
                 continue;
             }
             bail!("cannot download {filename} from {url}: HTTP status {status}");
         }
         match transfer_response(response, destination, filename)? {
             TransferOutcome::Complete(bytes) => {
-                tracing::info!(url = %transfer::redact_url(url), filename, bytes, path = %destination.display(), "self-update download completed");
+                tracing::info!(url, filename, bytes, path = %destination.display(), "self-update download completed");
                 return Ok(());
             }
-            TransferOutcome::Interrupted(message) if attempt < transfer::ATTEMPTS => {
+            TransferOutcome::Interrupted(message) if attempt < TRANSFER_ATTEMPTS => {
                 tracing::warn!(
                     attempt,
                     error = message,
                     "self-update response body failed; retrying"
                 );
-                thread::sleep(transfer::backoff_delay(attempt));
+                thread::sleep(Duration::from_millis(500 * attempt as u64));
             }
             TransferOutcome::Interrupted(message) => {
                 bail!(
@@ -96,37 +97,40 @@ fn transfer_response(
 ) -> Result<TransferOutcome> {
     let total = response.content_length();
     let progress = download_progress(filename, total);
-    let max_bytes = crate::archive::Limits::default().max_total_bytes;
     let mut output = File::create(destination)
         .with_context(|| format!("cannot create download file {}", destination.display()))?;
-    // Self-update verifies against SHA256SUMS.txt after the transfer, so
-    // the pipelined digest is computed and discarded here.
-    let mut digest = Sha256::new();
-    let transferred = transfer::stream_response(
-        &mut response,
-        &mut output,
-        destination,
-        0,
-        total,
-        max_bytes,
-        |chunk, _output| {
-            digest.update(chunk);
-            progress.inc(chunk.len() as u64);
-            Ok(())
-        },
-    );
-    drop(digest);
-    progress.finish_and_clear();
-    match transferred {
-        Ok(bytes) => Ok(TransferOutcome::Complete(bytes)),
-        Err(TransferFailure::Fatal(error)) => Err(error),
-        Err(TransferFailure::Retryable { message, .. }) => {
-            Ok(TransferOutcome::Interrupted(message))
+    let mut downloaded = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        match response.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                output.write_all(&buffer[..read]).with_context(|| {
+                    format!("cannot write download file {}", destination.display())
+                })?;
+                downloaded += read as u64;
+                progress.inc(read as u64);
+            }
+            Err(error) => {
+                progress.finish_and_clear();
+                return Ok(TransferOutcome::Interrupted(format!(
+                    "cannot read response body: {error}"
+                )));
+            }
         }
-        Err(TransferFailure::LimitExceeded { written }) => bail!(
-            "download of {filename} wrote {written} bytes, exceeding the transfer limit of {max_bytes} bytes"
-        ),
     }
+    output
+        .sync_all()
+        .with_context(|| format!("cannot sync download file {}", destination.display()))?;
+    progress.finish_and_clear();
+    if let Some(total) = total
+        && total != downloaded
+    {
+        return Ok(TransferOutcome::Interrupted(format!(
+            "response ended at {downloaded} bytes, expected {total}"
+        )));
+    }
+    Ok(TransferOutcome::Complete(downloaded))
 }
 
 fn download_progress(filename: &str, total: Option<u64>) -> ProgressBar {
@@ -149,4 +153,10 @@ fn download_progress(filename: &str, total: Option<u64>) -> ProgressBar {
     progress.set_style(style);
     progress.set_message(filename.to_owned());
     progress
+}
+
+fn retryable_status(status: StatusCode) -> bool {
+    status == StatusCode::REQUEST_TIMEOUT
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
 }

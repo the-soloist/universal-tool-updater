@@ -9,7 +9,7 @@ fn check_command_validates_all_included_yaml_files() {
     fs::write(
         directory.path().join("manifest.yaml"),
         r#"
-schema_version: 6
+schema_version: 5
 include: [tools.yaml]
 paths:
   toolkit_root: Toolkit
@@ -49,7 +49,7 @@ fn check_command_returns_failure_for_an_invalid_value() {
     fs::write(
         directory.path().join("manifest.yaml"),
         r#"
-schema_version: 6
+schema_version: 5
 include: [tools.yaml]
 paths:
   toolkit_root: Toolkit

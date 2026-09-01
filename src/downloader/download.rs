@@ -1,13 +1,13 @@
 use std::fs;
+use std::io::{Read, Write};
 use std::thread;
 
 use anyhow::{Context, Result};
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
 use reqwest::header::{CONTENT_RANGE, ETAG, LAST_MODIFIED};
-use sha2::{Digest as _, Sha256};
+use sha2::{Digest, Sha256};
 
-use crate::archive::Limits;
 use crate::domain::{DownloadedArtifact, ResolvedArtifact, Tool};
 use crate::error::UpdaterError;
 use crate::paths::{filename_from_url, safe_filename};
@@ -16,67 +16,25 @@ use crate::workspace::ToolWorkspace;
 
 use super::completion::DownloadCompletion;
 use super::http::{
-    byte_range, filename_from_disposition, response_header, send_with_retry, unsatisfied_total,
-    validator_unchanged,
+    ATTEMPTS, RETRY_DELAY, byte_range, filename_from_disposition, response_header, send_with_retry,
+    unsatisfied_total, validator_unchanged,
 };
 use super::partial::{
-    Metadata as PartialMetadata, ResumeState, SessionLock, Verification,
-    checkpoint as checkpoint_partial, clear as clear_partial, empty_prefix_sha256,
-    length as partial_length, load as load_partial_metadata, paths as partial_paths,
-    prepare_resume, save as save_partial_metadata,
+    Metadata as PartialMetadata, Verification, checkpoint as checkpoint_partial,
+    clear as clear_partial, length as partial_length, load as load_partial_metadata,
+    paths as partial_paths, prepare_resume,
 };
 use super::recovery::recover_previous_download;
-use super::transfer::{ATTEMPTS, TransferFailure, backoff_delay, redact_url, stream_response};
 
-/// Interval between persisted SHA-256 checkpoints during a transfer: bounds
-/// the re-download volume after a crash to this many bytes.
 const HASH_CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024;
-
-/// Upper bound on zero-offset restarts caused by inconsistent servers.
-const MAX_RESTARTS: usize = 3;
-
-/// SHA-256 state kept in lockstep with the streamed bytes. `hashed_len`
-/// counts the bytes fed to the hasher, so the digest equals the SHA-256 of
-/// the first `hashed_len` file bytes only while that count matches the
-/// current file length; otherwise callers fall back to a full re-read.
-pub(super) struct StreamedDigest {
-    hasher: Sha256,
-    hashed_len: u64,
-}
-
-impl Default for StreamedDigest {
-    fn default() -> Self {
-        Self {
-            hasher: Sha256::new(),
-            hashed_len: 0,
-        }
-    }
-}
-
-impl StreamedDigest {
-    fn reset(&mut self) {
-        self.hasher = Sha256::new();
-        self.hashed_len = 0;
-    }
-
-    pub(super) fn synced_with(&self, len: u64) -> bool {
-        self.hashed_len == len
-    }
-
-    pub(super) fn prefix_digest(&self) -> String {
-        let digest = self.hasher.clone().finalize();
-        digest.iter().map(|byte| format!("{byte:02x}")).collect()
-    }
-}
 
 pub struct Downloader {
     client: Client,
-    limits: Limits,
 }
 
 impl Downloader {
-    pub fn new(client: Client, limits: Limits) -> Self {
-        Self { client, limits }
+    pub fn new(client: Client) -> Self {
+        Self { client }
     }
 
     pub(crate) fn download(
@@ -89,7 +47,6 @@ impl Downloader {
         progress: &TaskProgress,
     ) -> Result<DownloadedArtifact> {
         let (index, artifacts) = position;
-        warn_insecure_transport(tool, &artifact.url);
         let directory = workspace.downloads();
         let completion = DownloadCompletion {
             tool,
@@ -105,7 +62,6 @@ impl Downloader {
                 partial_directory.display()
             )
         })?;
-        let _session_lock = SessionLock::acquire(partial_directory, &tool.id)?;
         let (temporary, metadata_path) = partial_paths(partial_directory, &artifact.url);
         let mut metadata = load_partial_metadata(&metadata_path, &temporary, &artifact.url)?;
         let downloaded = partial_length(metadata.as_ref(), &temporary)?;
@@ -114,22 +70,13 @@ impl Downloader {
         {
             metadata = Some(recovered);
         }
-        let ResumeState {
-            metadata: resumed_metadata,
-            downloaded: resumed_length,
-            hasher,
-        } = prepare_resume(&metadata_path, &temporary, metadata)?;
-        let mut metadata = resumed_metadata;
-        let mut downloaded = resumed_length;
-        let mut streamed = StreamedDigest {
-            hasher,
-            hashed_len: resumed_length,
-        };
+        let resume = prepare_resume(&metadata_path, &temporary, metadata)?;
+        let mut metadata = resume.metadata;
+        let mut downloaded = resume.downloaded;
+        let mut hasher = resume.hasher;
 
         let mut transfer_attempt = 1;
-        let mut restarts = 0_usize;
         loop {
-            let iteration_start = downloaded;
             let requested_offset = downloaded;
             let validator = metadata.as_ref().and_then(PartialMetadata::validator);
             let mut response = send_with_retry(
@@ -140,6 +87,7 @@ impl Downloader {
                 validator,
             )?;
 
+            // 416 可能表示缓存文件已完整；仅当服务器报告的长度等于缓存长度且已有校验标识未变化时接受。
             if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
                 let remote_total = unsatisfied_total(&response);
                 if requested_offset > 0
@@ -152,25 +100,23 @@ impl Downloader {
                         "partial download metadata disappeared before finalizing the download",
                     )?;
                     partial.total = remote_total;
-                    checkpoint_partial(
+                    let digest = checkpoint_partial(
                         &metadata_path,
                         partial,
                         requested_offset,
-                        &streamed.hasher,
+                        &hasher,
                         true,
                     )?;
                     progress.download(index + 1, artifacts, &partial.filename, remote_total);
                     progress.set_position(requested_offset);
                     return completion.finalize(
                         &temporary,
-                        &metadata_path,
                         &partial.filename,
                         requested_offset,
-                        Some(&streamed),
+                        &digest,
                     );
                 }
 
-                count_restart(tool, &artifact.url, &mut restarts)?;
                 tracing::warn!(
                     tool = %tool.id,
                     url = %artifact.url,
@@ -181,7 +127,7 @@ impl Downloader {
                 clear_partial(&metadata_path, &temporary)?;
                 metadata = None;
                 downloaded = 0;
-                streamed.reset();
+                hasher = Sha256::new();
                 continue;
             }
 
@@ -224,7 +170,6 @@ impl Downloader {
                         }
                         .into());
                     }
-                    count_restart(tool, &artifact.url, &mut restarts)?;
                     // 错误的范围响应若直接追加会静默破坏文件，因此丢弃断点状态并从零开始请求。
                     tracing::warn!(
                         tool = %tool.id,
@@ -236,7 +181,7 @@ impl Downloader {
                     clear_partial(&metadata_path, &temporary)?;
                     metadata = None;
                     downloaded = 0;
-                    streamed.reset();
+                    hasher = Sha256::new();
                     continue;
                 }
             } else if requested_offset > 0 {
@@ -248,7 +193,7 @@ impl Downloader {
                     "server did not resume the download; restarting from zero"
                 );
                 downloaded = 0;
-                streamed.reset();
+                hasher = Sha256::new();
             }
             let append = requested_offset > 0 && status == StatusCode::PARTIAL_CONTENT;
 
@@ -282,32 +227,9 @@ impl Downloader {
             } else {
                 response.content_length()
             };
-            if let Some(total) = total.filter(|total| *total > self.limits.max_total_bytes) {
-                return Err(UpdaterError::Download {
-                    tool: tool.id.clone(),
-                    message: format!(
-                        "download from {} reports {total} bytes, exceeding the extraction limit of {} bytes",
-                        artifact.url, self.limits.max_total_bytes
-                    ),
-                }
-                .into());
-            }
-            // The prefix digest covers the bytes already on disk: a resumed
-            // transfer carries the digest verified at load time forward,
-            // while a fresh transfer starts from the empty digest. Bytes
-            // streamed this round are hashed as they arrive and folded into
-            // the metadata at periodic checkpoints, keeping the hashing
-            // linear.
-            let (prefix_sha256, prefix_len) = if append {
-                let partial = metadata
-                    .as_ref()
-                    .expect("a resumed transfer keeps its verified metadata");
-                (partial.prefix_sha256.clone(), partial.prefix_len)
-            } else {
-                (empty_prefix_sha256(), 0)
-            };
             let next_metadata = PartialMetadata {
                 schema_version: super::partial::SCHEMA_VERSION,
+                url: artifact.url.clone(),
                 filename: filename.clone(),
                 etag: response_header(&response, &ETAG)
                     .or_else(|| append.then(|| metadata.as_ref()?.etag.clone()).flatten()),
@@ -317,8 +239,8 @@ impl Downloader {
                         .flatten()
                 }),
                 total,
-                prefix_sha256,
-                prefix_len,
+                downloaded: None,
+                sha256: None,
                 complete: false,
                 verified: Verification::None,
             };
@@ -331,10 +253,9 @@ impl Downloader {
                 .with_context(|| format!("cannot open partial download {}", temporary.display()))?;
             if !append {
                 downloaded = 0;
-                streamed.reset();
+                hasher = Sha256::new();
             }
-            save_partial_metadata(&metadata_path, &next_metadata)?;
-            metadata = Some(next_metadata);
+            let mut next_metadata = next_metadata;
             let mut last_checkpoint = downloaded;
 
             tracing::debug!(
@@ -342,7 +263,7 @@ impl Downloader {
                 artifact = index + 1,
                 artifacts,
                 filename,
-                url = %redact_url(&artifact.url),
+                url = %artifact.url,
                 resumed_from = downloaded,
                 bytes = ?total,
                 "artifact download started"
@@ -350,78 +271,57 @@ impl Downloader {
             progress.download(index + 1, artifacts, &filename, total);
             progress.set_position(downloaded);
 
-            let on_chunk = |chunk: &[u8], output: &mut fs::File| -> Result<()> {
-                streamed.hasher.update(chunk);
-                streamed.hashed_len += chunk.len() as u64;
-                progress.inc(chunk.len() as u64);
-                if streamed.hashed_len.saturating_sub(last_checkpoint) >= HASH_CHECKPOINT_BYTES {
-                    // Sync the data file before the metadata checkpoint so a
-                    // crash never leaves the checkpoint ahead of the bytes.
-                    output.sync_data().with_context(|| {
-                        format!("cannot sync download file {}", temporary.display())
-                    })?;
-                    let current = metadata
-                        .as_mut()
-                        .expect("streaming keeps its metadata present");
-                    checkpoint_partial(
-                        &metadata_path,
-                        current,
-                        streamed.hashed_len,
-                        &streamed.hasher,
-                        false,
-                    )?;
-                    last_checkpoint = streamed.hashed_len;
-                }
-                Ok(())
-            };
-            let transferred = stream_response(
-                &mut response,
-                &mut output,
-                &temporary,
-                downloaded,
-                response_end,
-                self.limits.max_total_bytes,
-                on_chunk,
-            );
-            let round_synced = match &transferred {
-                Err(TransferFailure::LimitExceeded { .. }) => None,
-                _ => Some(output.sync_all()),
-            };
-            drop(output);
-
-            let transfer_error = match transferred {
-                Ok(written) => {
-                    downloaded = written;
-                    None
-                }
-                Err(TransferFailure::Retryable { written, message }) => {
-                    downloaded = written;
-                    Some(message)
-                }
-                Err(TransferFailure::Fatal(error)) => return Err(error),
-                Err(TransferFailure::LimitExceeded { written }) => {
-                    clear_partial(&metadata_path, &temporary)?;
-                    return Err(UpdaterError::Download {
-                        tool: tool.id.clone(),
-                        message: format!(
-                            "download from {} wrote {written} bytes, exceeding the extraction limit of {} bytes",
-                            artifact.url, self.limits.max_total_bytes
-                        ),
+            let mut buffer = [0_u8; 64 * 1024];
+            let transfer_error = loop {
+                match response.read(&mut buffer) {
+                    Ok(0) => break None,
+                    Ok(read) => {
+                        output.write_all(&buffer[..read]).with_context(|| {
+                            format!("cannot write download file {}", temporary.display())
+                        })?;
+                        downloaded += read as u64;
+                        hasher.update(&buffer[..read]);
+                        progress.inc(read as u64);
+                        if downloaded.saturating_sub(last_checkpoint) >= HASH_CHECKPOINT_BYTES {
+                            output.sync_data().with_context(|| {
+                                format!("cannot sync download file {}", temporary.display())
+                            })?;
+                            checkpoint_partial(
+                                &metadata_path,
+                                &mut next_metadata,
+                                downloaded,
+                                &hasher,
+                                false,
+                            )?;
+                            last_checkpoint = downloaded;
+                        }
                     }
-                    .into());
+                    Err(error) => break Some(format!("cannot read response body: {error}")),
                 }
             };
-            if let Some(synced) = round_synced {
-                synced.with_context(|| {
-                    format!("cannot sync download file {}", temporary.display())
-                })?;
-            }
-            // Persist the exact bytes of this round so an interrupted run
-            // resumes from here instead of the last periodic checkpoint.
-            if let Some(current) = metadata.as_mut() {
-                checkpoint_partial(&metadata_path, current, downloaded, &streamed.hasher, false)?;
-            }
+            output
+                .sync_all()
+                .with_context(|| format!("cannot sync download file {}", temporary.display()))?;
+            drop(output);
+            checkpoint_partial(
+                &metadata_path,
+                &mut next_metadata,
+                downloaded,
+                &hasher,
+                false,
+            )?;
+
+            let transfer_error = transfer_error.or_else(|| {
+                response_end
+                    .filter(|expected| downloaded != *expected)
+                    .map(|expected| {
+                        format!(
+                            "download response ended at {downloaded}, expected {expected} bytes"
+                        )
+                    })
+            });
             if let Some(message) = transfer_error {
+                metadata = Some(next_metadata);
                 if transfer_attempt < ATTEMPTS {
                     tracing::warn!(
                         tool = %tool.id,
@@ -431,7 +331,7 @@ impl Downloader {
                         error = message,
                         "download body failed; resuming"
                     );
-                    thread::sleep(backoff_delay(transfer_attempt));
+                    thread::sleep(RETRY_DELAY * transfer_attempt as u32);
                     transfer_attempt += 1;
                     continue;
                 }
@@ -455,62 +355,19 @@ impl Downloader {
             if status == StatusCode::PARTIAL_CONTENT
                 && total.is_some_and(|total| downloaded < total)
             {
-                if downloaded <= iteration_start {
-                    return Err(UpdaterError::Download {
-                        tool: tool.id.clone(),
-                        message: format!(
-                            "download from {} made no progress in the last transfer round",
-                            artifact.url
-                        ),
-                    }
-                    .into());
-                }
+                metadata = Some(next_metadata);
+                transfer_attempt = 1;
                 continue;
             }
 
-            checkpoint_partial(
+            let digest = checkpoint_partial(
                 &metadata_path,
-                metadata
-                    .as_mut()
-                    .expect("a completed round keeps its metadata"),
+                &mut next_metadata,
                 downloaded,
-                &streamed.hasher,
+                &hasher,
                 true,
             )?;
-            return completion.finalize(
-                &temporary,
-                &metadata_path,
-                &filename,
-                downloaded,
-                Some(&streamed),
-            );
+            return completion.finalize(&temporary, &filename, downloaded, &digest);
         }
     }
-}
-
-fn warn_insecure_transport(tool: &Tool, url: &str) {
-    if let Ok(parsed) = url::Url::parse(url)
-        && parsed.scheme() == "http"
-    {
-        tracing::warn!(
-            tool = %tool.id,
-            url = %redact_url(url),
-            "downloading over plain HTTP; the connection is not encrypted and the download can be tampered with (allow_insecure_transports is enabled)"
-        );
-    }
-}
-
-fn count_restart(tool: &Tool, url: &str, restarts: &mut usize) -> Result<()> {
-    if *restarts >= MAX_RESTARTS {
-        return Err(UpdaterError::Download {
-            tool: tool.id.clone(),
-            message: format!(
-                "download from {url} restarted {} time(s) without completing; restart limit is {MAX_RESTARTS}",
-                *restarts
-            ),
-        }
-        .into());
-    }
-    *restarts += 1;
-    Ok(())
 }

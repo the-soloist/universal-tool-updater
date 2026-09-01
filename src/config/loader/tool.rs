@@ -77,7 +77,6 @@ fn resolve_install(
             .unwrap_or_else(|| defaults.install.archive_name.clone()),
         archive_password: raw.archive_password.clone(),
         executable: raw.executable.clone(),
-        allow_symlinks_in_archive: raw.allow_symlinks_in_archive,
         symlinks,
     })
 }

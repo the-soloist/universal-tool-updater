@@ -238,47 +238,4 @@ mod tests {
         ));
         assert!(Cli::try_parse_from(["updater", "self-update", "--status", "--force"]).is_err());
     }
-
-    /// Cross-version contract: a freshly installed updater spawns
-    /// `__self-replace` / `__self-cleanup` against whatever binary is
-    /// currently on disk, so older binaries must keep parsing these hidden
-    /// commands. Non-Windows builds never define them and must reject them.
-    #[test]
-    fn locks_the_hidden_self_update_helper_contract() {
-        #[cfg(windows)]
-        {
-            let cleanup =
-                Cli::try_parse_from(["updater", "__self-cleanup", "--work-dir", "x"]).unwrap();
-            assert!(matches!(cleanup.command, Some(Command::SelfCleanup { .. })));
-            let replace = Cli::try_parse_from([
-                "updater",
-                "__self-replace",
-                "--target",
-                "a",
-                "--candidate",
-                "b",
-                "--version",
-                "v",
-            ])
-            .unwrap();
-            assert!(matches!(replace.command, Some(Command::SelfReplace { .. })));
-        }
-        #[cfg(not(windows))]
-        {
-            assert!(Cli::try_parse_from(["updater", "__self-cleanup", "--work-dir", "x"]).is_err());
-            assert!(
-                Cli::try_parse_from([
-                    "updater",
-                    "__self-replace",
-                    "--target",
-                    "a",
-                    "--candidate",
-                    "b",
-                    "--version",
-                    "v"
-                ])
-                .is_err()
-            );
-        }
-    }
 }

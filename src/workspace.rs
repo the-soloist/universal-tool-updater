@@ -232,15 +232,9 @@ fn clear_directory(path: &Path, path_label: &str, directory_label: &str) -> Resu
 impl Drop for ToolWorkspace {
     fn drop(&mut self) {
         let _ = fs::remove_dir(&self.partials);
-    }
-}
-
-impl Drop for RunWorkspace {
-    fn drop(&mut self) {
-        // The shared `.partial` directory is cleaned at run scope: tool-level
-        // drops racing on the same directory would make its removal depend on
-        // drop order. remove_dir still only succeeds when it is empty.
-        let _ = fs::remove_dir(&self.partials);
+        if let Some(root) = self.partials.parent() {
+            let _ = fs::remove_dir(root);
+        }
     }
 }
 

@@ -1,4 +1,5 @@
 use std::thread;
+use std::time::Duration;
 
 use anyhow::Result;
 use reqwest::StatusCode;
@@ -11,7 +12,8 @@ use crate::domain::Tool;
 use crate::error::UpdaterError;
 use crate::paths::{decode_url_component, safe_filename};
 
-use super::transfer::{ATTEMPTS, backoff_delay, is_retryable_status};
+pub(super) const ATTEMPTS: usize = 3;
+pub(super) const RETRY_DELAY: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ByteRange {
@@ -64,7 +66,7 @@ pub(super) fn send_with_retry(
                         error = %error,
                         "download request failed; retrying"
                     );
-                    thread::sleep(backoff_delay(attempt));
+                    thread::sleep(RETRY_DELAY * attempt as u32);
                     continue;
                 }
 
@@ -100,7 +102,7 @@ pub(super) fn validator_unchanged(response: &Response, expected: Option<&str>) -
         .iter()
         .filter_map(|name| response_header(response, name))
         .collect::<Vec<_>>();
-    actual.iter().any(|value| value == expected)
+    actual.is_empty() || actual.iter().any(|value| value == expected)
 }
 
 pub(super) fn byte_range(response: &Response) -> Option<ByteRange> {
@@ -157,6 +159,14 @@ fn filename_from_content_disposition(value: &str) -> Option<String> {
         }
     }
     fallback
+}
+
+pub(super) fn is_retryable_status(status: Option<StatusCode>) -> bool {
+    status.is_none_or(|status| {
+        status == StatusCode::REQUEST_TIMEOUT
+            || status == StatusCode::TOO_MANY_REQUESTS
+            || status.is_server_error()
+    })
 }
 
 #[cfg(test)]

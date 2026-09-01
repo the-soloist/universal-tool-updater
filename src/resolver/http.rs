@@ -1,13 +1,13 @@
 use anyhow::Result;
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{HeaderMap, HeaderName};
-use sha2::{Digest, Sha256};
+use sha1::{Digest, Sha1};
 
 use crate::domain::{ArtifactConfig, ResolvedArtifact, ResolvedRelease, Tool};
 use crate::error::UpdaterError;
 use crate::paths::filename_from_url;
 
-use super::util::{expected_sha256, incompatible_artifact};
+use super::util::incompatible_artifact;
 
 pub(super) fn resolve(
     client: &Client,
@@ -35,19 +35,16 @@ pub(super) fn resolve(
             ArtifactConfig::ReleaseUrl => ResolvedArtifact {
                 url: release_url.to_owned(),
                 filename: filename_from_url(release_url),
-                expected_sha256: None,
             },
-            ArtifactConfig::DirectUrl { url, .. } => ResolvedArtifact {
+            ArtifactConfig::DirectUrl { url } => ResolvedArtifact {
                 url: url.clone(),
                 filename: filename_from_url(url),
-                expected_sha256: expected_sha256(artifact, &version),
             },
-            ArtifactConfig::UrlTemplate { url, .. } => {
+            ArtifactConfig::UrlTemplate { url } => {
                 let url = url.replace("{version}", &version);
                 ResolvedArtifact {
                     filename: filename_from_url(&url),
                     url,
-                    expected_sha256: expected_sha256(artifact, &version),
                 }
             }
             ArtifactConfig::GithubAsset { .. } => {
@@ -76,15 +73,9 @@ fn version_from_headers(headers: &HeaderMap, names: &[String]) -> Option<String>
         let Some(value) = headers.get(name) else {
             continue;
         };
-        let mut digest = Sha256::new();
+        let mut digest = Sha1::new();
         digest.update(value.as_bytes());
-        return Some(
-            digest
-                .finalize()
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect(),
-        );
+        return Some(format!("{:x}", digest.finalize()));
     }
     None
 }
@@ -102,7 +93,7 @@ mod tests {
         let version = version_from_headers(&headers, &["etag".to_owned()]);
         assert_eq!(
             version.as_deref(),
-            Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+            Some("a9993e364706816aba3e25717850c26c9cd0d89d")
         );
     }
 }

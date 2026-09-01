@@ -74,21 +74,6 @@ impl ArchiveState {
     }
 }
 
-/// One pending state transition collected during a run and persisted together
-/// by [`StateStore::record_all`].
-#[derive(Debug, Clone)]
-pub(crate) enum StateRecord {
-    /// A finished installation: the recorded version plus the identity of the
-    /// installed archive when the tool produces one.
-    Installation {
-        version: String,
-        archive: Option<ArchiveState>,
-    },
-    /// A verified archive for an already-recorded version; never changes the
-    /// version and requires an existing entry.
-    Archive(ArchiveState),
-}
-
 impl StateStore {
     pub fn load(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
@@ -131,84 +116,55 @@ impl StateStore {
             .and_then(|entry| entry.archive.as_ref())
     }
 
-    #[cfg(test)]
     pub fn record(&mut self, tool_id: &str, version: &str) -> Result<()> {
-        self.record_all(&[(
-            tool_id.to_owned(),
-            StateRecord::Installation {
-                version: version.to_owned(),
-                archive: None,
-            },
-        )])
+        self.record_installation(tool_id, version, None)
     }
 
-    #[cfg(test)]
     pub(crate) fn record_installation(
         &mut self,
         tool_id: &str,
         version: &str,
         archive: Option<ArchiveState>,
     ) -> Result<()> {
-        self.record_all(&[(
-            tool_id.to_owned(),
-            StateRecord::Installation {
-                version: version.to_owned(),
-                archive,
-            },
-        )])
-    }
-
-    #[cfg(test)]
-    pub(crate) fn record_archive(&mut self, tool_id: &str, archive: ArchiveState) -> Result<()> {
-        self.record_all(&[(tool_id.to_owned(), StateRecord::Archive(archive))])
-    }
-
-    /// Persists several tool records with one serialization and one atomic
-    /// write, rolling every in-memory entry back when persistence fails.
-    pub fn record_all(&mut self, entries: &[(String, StateRecord)]) -> Result<()> {
-        if entries.is_empty() {
-            return Ok(());
-        }
         let updated_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .context("system time is before Unix epoch")?
             .as_secs();
-        let previous = entries
-            .iter()
-            .map(|(tool_id, record)| -> Result<(String, Option<ToolState>)> {
-                let before = self.data.tools.get(tool_id).cloned();
-                match record {
-                    StateRecord::Installation { version, archive } => {
-                        self.data.tools.insert(
-                            tool_id.clone(),
-                            ToolState {
-                                version: version.clone(),
-                                updated_at,
-                                archive: archive.clone(),
-                            },
-                        );
-                    }
-                    StateRecord::Archive(archive) => {
-                        let entry = self
-                            .data
-                            .tools
-                            .get_mut(tool_id)
-                            .with_context(|| format!("cannot find state for tool {tool_id}"))?;
-                        entry.archive = Some(archive.clone());
-                    }
-                }
-                Ok((tool_id.clone(), before))
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let previous = self.data.tools.insert(
+            tool_id.to_owned(),
+            ToolState {
+                version: version.to_owned(),
+                updated_at,
+                archive,
+            },
+        );
         // 持久化失败时恢复内存中的旧值，避免重试看到从未写入磁盘的更新。
         if let Err(error) = self.save() {
-            for (tool_id, previous) in previous {
-                if let Some(previous) = previous {
-                    self.data.tools.insert(tool_id, previous);
-                } else {
-                    self.data.tools.remove(&tool_id);
-                }
+            if let Some(previous) = previous {
+                self.data.tools.insert(tool_id.to_owned(), previous);
+            } else {
+                self.data.tools.remove(tool_id);
             }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn record_archive(&mut self, tool_id: &str, archive: ArchiveState) -> Result<()> {
+        let previous = {
+            let entry = self
+                .data
+                .tools
+                .get_mut(tool_id)
+                .with_context(|| format!("cannot find state for tool {tool_id}"))?;
+            entry.archive.replace(archive)
+        };
+        if let Err(error) = self.save() {
+            self.data
+                .tools
+                .get_mut(tool_id)
+                .expect("the state entry existed before persistence")
+                .archive = previous;
             return Err(error);
         }
         Ok(())
@@ -243,7 +199,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{ArchiveState, StateRecord, StateStore};
+    use super::{ArchiveState, StateStore};
 
     #[test]
     fn persists_versions_atomically() {
@@ -272,102 +228,6 @@ mod tests {
         let reloaded = StateStore::load(path).unwrap();
         assert_eq!(reloaded.version("failed"), None);
         assert_eq!(reloaded.version("working"), Some("v2"));
-    }
-
-    #[test]
-    fn record_all_persists_every_entry_in_one_write() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("state.yaml");
-        let mut state = StateStore::load(&path).unwrap();
-
-        state
-            .record_all(&[
-                (
-                    "bat".to_owned(),
-                    StateRecord::Installation {
-                        version: "v1.2.3".to_owned(),
-                        archive: None,
-                    },
-                ),
-                (
-                    "frida".to_owned(),
-                    StateRecord::Installation {
-                        version: "16.7.19".to_owned(),
-                        archive: None,
-                    },
-                ),
-            ])
-            .unwrap();
-
-        let reloaded = StateStore::load(&path).unwrap();
-        assert_eq!(reloaded.version("bat"), Some("v1.2.3"));
-        assert_eq!(reloaded.version("frida"), Some("16.7.19"));
-    }
-
-    #[test]
-    fn record_all_matches_sequential_record_results() {
-        let batched = tempdir().unwrap();
-        let sequential = tempdir().unwrap();
-        let mut batched = StateStore::load(batched.path().join("state.yaml")).unwrap();
-        let mut sequential = StateStore::load(sequential.path().join("state.yaml")).unwrap();
-        let versions = ["v1.2.3", "16.7.19", "v1.3.0"];
-        let entries = ["bat", "frida", "bat"]
-            .into_iter()
-            .zip(versions)
-            .map(|(tool_id, version)| {
-                (
-                    tool_id.to_owned(),
-                    StateRecord::Installation {
-                        version: version.to_owned(),
-                        archive: None,
-                    },
-                )
-            })
-            .collect::<Vec<_>>();
-
-        batched.record_all(&entries).unwrap();
-        for (tool_id, record) in &entries {
-            let StateRecord::Installation { version, .. } = record else {
-                unreachable!("the fixture only uses installations");
-            };
-            sequential.record(tool_id, version).unwrap();
-        }
-
-        assert_eq!(batched.version("bat"), sequential.version("bat"));
-        assert_eq!(batched.version("frida"), sequential.version("frida"));
-    }
-
-    #[test]
-    fn restores_in_memory_state_when_batched_persistence_fails() {
-        let directory = tempdir().unwrap();
-        let parent = directory.path().join("state");
-        let path = parent.join("state.yaml");
-        let mut state = StateStore::load(&path).unwrap();
-        std::fs::write(&parent, "blocks directory creation").unwrap();
-
-        let installation = |tool_id: &str, version: &str| {
-            (
-                tool_id.to_owned(),
-                StateRecord::Installation {
-                    version: version.to_owned(),
-                    archive: None,
-                },
-            )
-        };
-        assert!(
-            state
-                .record_all(&[installation("alpha", "v1"), installation("beta", "v2")])
-                .is_err()
-        );
-        assert_eq!(state.version("alpha"), None);
-        assert_eq!(state.version("beta"), None);
-
-        std::fs::remove_file(&parent).unwrap();
-        state.record("working", "v3").unwrap();
-        let reloaded = StateStore::load(&path).unwrap();
-        assert_eq!(reloaded.version("alpha"), None);
-        assert_eq!(reloaded.version("beta"), None);
-        assert_eq!(reloaded.version("working"), Some("v3"));
     }
 
     #[test]

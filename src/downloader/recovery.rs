@@ -8,7 +8,7 @@ use crate::paths::safe_filename;
 use crate::workspace::ToolWorkspace;
 
 use super::completion::{materialize_file, replace_file};
-use super::partial::{Metadata as PartialMetadata, SCHEMA_VERSION, Verification, hash_prefix};
+use super::partial::{Metadata as PartialMetadata, Verification};
 
 pub(super) fn recover_previous_download(
     tool: &Tool,
@@ -53,17 +53,15 @@ pub(super) fn recover_previous_download(
             tool.id
         )
     })?;
-    // The recovered bytes were never hashed in this run, so the prefix
-    // digest is computed now; the next load re-hashes and compares as usual.
-    let prefix_sha256 = hash_prefix(partial, previous_length)?;
     let metadata = PartialMetadata {
-        schema_version: SCHEMA_VERSION,
+        schema_version: 1,
+        url: artifact.url.clone(),
         filename,
         etag: None,
         last_modified: None,
         total: Some(previous_length),
-        prefix_sha256,
-        prefix_len: previous_length,
+        downloaded: None,
+        sha256: None,
         complete: false,
         verified: Verification::None,
     };

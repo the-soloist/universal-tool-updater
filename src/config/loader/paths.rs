@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -111,70 +110,7 @@ pub(super) fn resolve_destination(root: &Path, raw: &Path) -> std::result::Resul
 }
 
 pub(super) fn paths_overlap(left: &Path, right: &Path) -> bool {
-    let left = canonicalized(left);
-    let right = canonicalized(right);
-    path_starts_with(&left, &right) || path_starts_with(&right, &left)
-}
-
-thread_local! {
-    /// Memoizes canonicalized comparison keys so repeated overlap checks during
-    /// one configuration load do not re-stat the same paths.
-    static CANONICALIZED: std::cell::RefCell<std::collections::HashMap<PathBuf, PathBuf>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
-}
-
-/// Canonicalizes the longest existing ancestor so differently-spelled but equal
-/// directories (case, symlinks, verbatim prefixes) compare equal; paths whose
-/// ancestors cannot be canonicalized stay in textual form.
-fn canonicalized(path: &Path) -> PathBuf {
-    let remembered = CANONICALIZED.with(|cache| cache.borrow().get(path).cloned());
-    if let Some(remembered) = remembered {
-        return remembered;
-    }
-    let result = canonicalize_longest_ancestor(path);
-    CANONICALIZED.with(|cache| {
-        cache
-            .borrow_mut()
-            .insert(path.to_path_buf(), result.clone())
-    });
-    result
-}
-
-fn canonicalize_longest_ancestor(path: &Path) -> PathBuf {
-    let mut current = path.to_path_buf();
-    while current.as_os_str() != "" {
-        if let Ok(canonical) = fs::canonicalize(&current) {
-            let rest = path.strip_prefix(&current).unwrap_or(Path::new(""));
-            return comparable_form(canonical.join(rest));
-        }
-        let Some(parent) = current.parent() else {
-            break;
-        };
-        if parent == current {
-            break;
-        }
-        current = parent.to_path_buf();
-    }
-    path.to_path_buf()
-}
-
-/// Windows fs::canonicalize returns \\?\-prefixed verbatim paths that never
-/// compare equal to plain spellings; strip the prefix for comparison only.
-#[cfg(windows)]
-fn comparable_form(path: PathBuf) -> PathBuf {
-    let text = path.as_os_str().to_string_lossy();
-    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
-        return PathBuf::from(format!(r"\\{rest}"));
-    }
-    if let Some(rest) = text.strip_prefix(r"\\?\") {
-        return PathBuf::from(rest);
-    }
-    path
-}
-
-#[cfg(not(windows))]
-fn comparable_form(path: PathBuf) -> PathBuf {
-    path
+    path_starts_with(left, right) || path_starts_with(right, left)
 }
 
 fn path_starts_with(path: &Path, base: &Path) -> bool {
@@ -182,12 +118,8 @@ fn path_starts_with(path: &Path, base: &Path) -> bool {
     let mut path = path.components();
     base.components().all(|expected| {
         path.next().is_some_and(|actual| {
-            // ASCII-only folding: Windows guarantees case-insensitivity for
-            // ASCII but not for other scripts, so e.g. Cyrillic look-alikes
-            // must not compare equal.
-            actual
-                .as_os_str()
-                .eq_ignore_ascii_case(expected.as_os_str())
+            actual.as_os_str().to_string_lossy().to_lowercase()
+                == expected.as_os_str().to_string_lossy().to_lowercase()
         })
     })
 }
@@ -210,62 +142,4 @@ fn resolve_setting_path(base: &Path, raw: &Path) -> Result<PathBuf> {
         base.join(expanded)
     };
     Ok(normalize_path(&resolved))
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::Path;
-
-    use tempfile::tempdir;
-
-    use super::paths_overlap;
-
-    #[test]
-    fn detects_overlap_through_differently_cased_existing_ancestors() {
-        let directory = tempdir().unwrap();
-        let real = directory.path().join("Real");
-        std::fs::create_dir(&real).unwrap();
-
-        let staging = real.join("staging");
-        let state = directory.path().join("real/staging/state.yaml");
-        assert!(paths_overlap(&staging, &state));
-    }
-
-    #[test]
-    fn keeps_disjoint_directories_apart() {
-        let directory = tempdir().unwrap();
-        let staging = directory.path().join("downloads/staging");
-        let state = directory.path().join("toolkit/.updater/state.yaml");
-        assert!(!paths_overlap(&staging, &state));
-    }
-
-    #[test]
-    fn falls_back_to_case_insensitive_text_comparison_for_missing_paths() {
-        let staging = Path::new("/definitely/missing/staging");
-        let state = Path::new("/Definitely/Missing/Staging/state.yaml");
-        assert!(paths_overlap(staging, state));
-        let elsewhere = Path::new("/definitely/missing-elsewhere/state.yaml");
-        assert!(!paths_overlap(staging, elsewhere));
-    }
-
-    #[test]
-    fn does_not_fold_non_ascii_case_differences() {
-        let directory = tempdir().unwrap();
-        let staging = directory.path().join("стагинг");
-        let state = directory.path().join("СТАГИНГ/state.yaml");
-        assert!(
-            !paths_overlap(&staging, &state),
-            "Windows only guarantees ASCII case-insensitivity"
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn matches_verbatim_and_plain_spellings_of_the_same_directory() {
-        let directory = tempdir().unwrap();
-        let staging =
-            std::path::PathBuf::from(format!(r"\\?\{}\staging", directory.path().display()));
-        let state = directory.path().join("staging/state.yaml");
-        assert!(paths_overlap(&staging, &state));
-    }
 }

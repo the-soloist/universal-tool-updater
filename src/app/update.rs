@@ -6,9 +6,9 @@ use std::thread;
 
 use anyhow::{Context, Result, bail};
 
-use crate::archive::{ArchiveService, Limits};
+use crate::archive::ArchiveService;
 use crate::config::AppConfig;
-use crate::domain::{ReleaseConfig, Tool, UpdateResult, UpdateStatus};
+use crate::domain::{Tool, UpdateResult, UpdateStatus};
 use crate::downloader::Downloader;
 use crate::hooks::{HookContext, HookRunner, HookStage};
 use crate::installer::{
@@ -17,7 +17,7 @@ use crate::installer::{
 };
 use crate::progress::{ProgressManager, TaskProgress};
 use crate::resolver::Resolver;
-use crate::state::{ArchiveState, StateRecord, StateStore};
+use crate::state::{ArchiveState, StateStore};
 use crate::workspace::RunWorkspace;
 
 use super::report::print_summary;
@@ -71,9 +71,8 @@ pub(super) fn update_tools(
                 .map(|archive| (tool.id.clone(), archive.clone()))
         })
         .collect::<BTreeMap<_, _>>();
-    let resolver = Resolver::new(&config.network, config.allow_insecure_transports)?;
-    let limits = Limits::from(config.extraction_limits);
-    let downloader = Downloader::new(resolver.client().clone(), limits);
+    let resolver = Resolver::new(&config.network)?;
+    let downloader = Downloader::new(resolver.client().clone());
     let workspace = if options.dry_run {
         None
     } else {
@@ -82,8 +81,8 @@ pub(super) fn update_tools(
             &config.paths.staging,
         )?)
     };
-    let archive = ArchiveService::with_limits(limits);
-    let hooks = HookRunner::default();
+    let archive = ArchiveService;
+    let hooks = HookRunner;
     let installer = Installer::new(
         &archive,
         &hooks,
@@ -158,65 +157,39 @@ pub(super) fn update_tools(
         }
         drop(sender);
 
-        let mut state_entries = Vec::<(String, StateRecord)>::new();
-        let mut state_indices = Vec::<(usize, &'static str)>::new();
         for _ in 0..selected.len() {
             let mut outcome = receiver
                 .recv()
                 .context("update worker stopped before returning every tool result")?;
             // 仅在安装完成或归档已验证后更新状态，失败结果不能污染下次更新判断。
-            match outcome.result.status {
+            let record = match outcome.result.status {
                 UpdateStatus::Updated => {
                     let version = outcome
                         .result
                         .version
-                        .clone()
+                        .as_deref()
                         .expect("updated results always contain a version");
                     let tool = selected[outcome.index];
-                    match installed_archive_state(tool, &version) {
-                        Ok(archive) => {
-                            state_indices.push((
-                                outcome.index,
-                                "update installed but installation state could not be recorded",
-                            ));
-                            state_entries.push((
-                                outcome.result.tool_id.clone(),
-                                StateRecord::Installation { version, archive },
-                            ));
-                        }
-                        Err(error) => {
-                            outcome.result.status = UpdateStatus::Failed;
-                            outcome.result.message = format!(
-                                "update installed but installation state could not be recorded: {error:#}"
-                            );
-                        }
-                    }
+                    installed_archive_state(tool, version).and_then(|archive| {
+                        state.record_installation(&outcome.result.tool_id, version, archive)
+                    })
                 }
-                UpdateStatus::Current => {
-                    if let Some(archive) = outcome.archive.take() {
-                        state_indices.push((
-                            outcome.index,
-                            "installed archive verified but its state could not be recorded",
-                        ));
-                        state_entries.push((
-                            outcome.result.tool_id.clone(),
-                            StateRecord::Archive(archive),
-                        ));
-                    }
-                }
-                _ => {}
+                UpdateStatus::Current => outcome.archive.take().map_or(Ok(()), |archive| {
+                    state.record_archive(&outcome.result.tool_id, archive)
+                }),
+                _ => Ok(()),
+            };
+            if let Err(error) = record {
+                let message = if outcome.result.status == UpdateStatus::Updated {
+                    "update installed but installation state could not be recorded"
+                } else {
+                    "installed archive verified but its state could not be recorded"
+                };
+                outcome.result.status = UpdateStatus::Failed;
+                outcome.result.message = format!("{message}: {error:#}");
             }
             progress.complete();
             ordered_results[outcome.index] = Some(outcome.result);
-        }
-        if let Err(error) = state.record_all(&state_entries) {
-            for (index, message) in state_indices {
-                let result = ordered_results[index]
-                    .as_mut()
-                    .expect("every selected tool returns one result");
-                result.status = UpdateStatus::Failed;
-                result.message = format!("{message}: {error:#}");
-            }
         }
         Ok(())
     });
@@ -260,14 +233,6 @@ impl UpdateSession<'_> {
                 UpdateStatus::Skipped,
                 None,
                 "disabled",
-            )));
-        }
-        if matches!(tool.release, ReleaseConfig::Manual {}) {
-            return Ok(ToolUpdate::new(result(
-                tool,
-                UpdateStatus::Skipped,
-                None,
-                "managed manually; not auto-updated",
             )));
         }
         if !tool.install.destination.exists()

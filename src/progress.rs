@@ -6,10 +6,6 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 use crate::display::{pad_right, truncate, width as display_width};
 
-/// Terminal-size probes dominate the cost of inc() on Windows; the width is
-/// only re-checked once per this many increments.
-const WIDTH_PROBE_INTERVAL: u32 = 64;
-
 pub(crate) struct ProgressManager {
     multi: MultiProgress,
     overall: ProgressBar,
@@ -27,7 +23,6 @@ pub(crate) struct TaskProgress {
     prefix_width: Cell<usize>,
     download_label_width: Cell<usize>,
     terminal_width: Cell<usize>,
-    width_checks: Cell<u32>,
     determinate: Cell<bool>,
     enabled: bool,
 }
@@ -118,7 +113,6 @@ impl ProgressManager {
             prefix_width: Cell::new(prefix_width),
             download_label_width: Cell::new(0),
             terminal_width: Cell::new(0),
-            width_checks: Cell::new(0),
             determinate: Cell::new(false),
             enabled: self.enabled,
         }
@@ -187,7 +181,7 @@ impl TaskProgress {
 
     pub(crate) fn inc(&self, bytes: u64) {
         self.bar.inc(bytes);
-        if self.enabled && self.determinate.get() && width_probe_due(&self.width_checks) {
+        if self.enabled && self.determinate.get() {
             let terminal_width = current_terminal_width();
             if terminal_width != self.terminal_width.get() {
                 self.terminal_width.set(terminal_width);
@@ -304,15 +298,6 @@ fn current_terminal_width() -> usize {
     Term::stderr().size().1 as usize
 }
 
-/// Throttles terminal-size probes to one per WIDTH_PROBE_INTERVAL calls;
-/// resets the counter whenever a probe is due.
-fn width_probe_due(checks: &Cell<u32>) -> bool {
-    let count = checks.get() + 1;
-    let due = count >= WIDTH_PROBE_INTERVAL;
-    checks.set(if due { 0 } else { count });
-    due
-}
-
 fn style(template: &str) -> ProgressStyle {
     ProgressStyle::with_template(template)
         .expect("static progress template")
@@ -321,11 +306,7 @@ fn style(template: &str) -> ProgressStyle {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
-
-    use super::{
-        download_label, prefix_budget, split_download_width, task_prefix, width_probe_due,
-    };
+    use super::{download_label, prefix_budget, split_download_width, task_prefix};
     use crate::display::width as display_width;
 
     #[test]
@@ -364,16 +345,5 @@ mod tests {
         assert_eq!(narrow.0, 40);
         assert_eq!(wide.0, 40);
         assert!(wide.1 > narrow.1);
-    }
-
-    #[test]
-    fn probes_the_terminal_width_only_every_sixty_four_increments() {
-        let checks = Cell::new(0_u32);
-        let probes = (0..128).filter(|_| width_probe_due(&checks)).count();
-        assert_eq!(probes, 2, "expected probes after 64 and 128 increments");
-
-        let further = (0..63).filter(|_| width_probe_due(&checks)).count();
-        assert_eq!(further, 0, "the counter restarts after each probe");
-        assert!(width_probe_due(&checks));
     }
 }

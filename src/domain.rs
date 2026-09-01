@@ -5,29 +5,6 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) const VERSION_FILE: &str = ".version";
 
-/// Extraction quotas applied to archives and downloads; 8 GiB / 100k entries by default.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
-pub struct ExtractionLimits {
-    pub max_total_bytes: u64,
-    pub max_entries: usize,
-}
-
-impl Default for ExtractionLimits {
-    fn default() -> Self {
-        Self {
-            max_total_bytes: 8 * 1024 * 1024 * 1024,
-            max_entries: 100_000,
-        }
-    }
-}
-
-impl ExtractionLimits {
-    pub fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct NetworkConfig {
@@ -102,9 +79,6 @@ pub enum ReleaseConfig {
         repository: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         ignore_versions: Vec<String>,
-        /// Opt-in flag: prereleases stay excluded unless explicitly allowed.
-        #[serde(default, skip_serializing_if = "is_false")]
-        allow_prereleases: bool,
     },
     Web {
         url: String,
@@ -117,10 +91,6 @@ pub enum ReleaseConfig {
         #[serde(default = "default_version_headers")]
         version_headers: Vec<String>,
     },
-    /// Placeholder for tools that cannot be auto-updated (paid licenses,
-    /// login-walled downloads); the updater lists them but never resolves.
-    /// Empty struct variant so deny_unknown_fields rejects stray fields.
-    Manual {},
 }
 
 fn default_version_headers() -> Vec<String> {
@@ -136,21 +106,12 @@ fn default_version_headers() -> Vec<String> {
 pub enum ArtifactConfig {
     GithubAsset {
         pattern: String,
-        /// Optional integrity pin for the matched asset; supports `{version}`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        sha256: Option<String>,
     },
     GithubAssets {
         pattern: String,
-        /// Optional integrity pin applied to every matched asset; static only.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        sha256: Option<String>,
     },
     GithubSource {
         format: String,
-        /// Optional integrity pin for the source archive; static only.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        sha256: Option<String>,
     },
     PageLink {
         pattern: String,
@@ -159,13 +120,9 @@ pub enum ArtifactConfig {
     },
     DirectUrl {
         url: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        sha256: Option<String>,
     },
     UrlTemplate {
         url: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        sha256: Option<String>,
     },
     ReleaseUrl,
 }
@@ -211,8 +168,6 @@ pub enum HookAction {
         timeout_seconds: u64,
         #[serde(default, skip_serializing_if = "is_default")]
         working_directory: HookWorkingDirectory,
-        #[serde(default, skip_serializing_if = "is_default")]
-        environment_mode: EnvironmentMode,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         environment: BTreeMap<String, String>,
     },
@@ -237,22 +192,8 @@ pub enum HookWorkingDirectory {
     Install,
 }
 
-/// Environment handling for Python hook subprocesses. Minimal (the default)
-/// starts from a small allow-list instead of inheriting the parent environment.
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum EnvironmentMode {
-    #[default]
-    Minimal,
-    Inherit,
-}
-
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
     value == &T::default()
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
 }
 
 #[derive(Debug, Clone)]
@@ -267,8 +208,6 @@ pub struct InstallSpec {
     pub archive_password: Option<String>,
     pub executable: Vec<PathBuf>,
     pub symlinks: Vec<SymlinkSpec>,
-    /// Opt-in flag: archives containing symbolic or hard links are rejected by default.
-    pub allow_symlinks_in_archive: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -311,7 +250,6 @@ impl Tool {
 pub struct ResolvedArtifact {
     pub url: String,
     pub filename: Option<String>,
-    pub expected_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

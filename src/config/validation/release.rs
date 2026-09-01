@@ -9,17 +9,11 @@ use crate::config::model::{ArtifactConfig, ReleaseConfig};
 use crate::config::validation::validate_placeholders;
 use crate::error::UpdaterError;
 
-pub(super) fn validate(
-    path: &Path,
-    id: &str,
-    release: &ReleaseConfig,
-    allow_insecure_transports: bool,
-) -> Result<()> {
+pub(super) fn validate(path: &Path, id: &str, release: &ReleaseConfig) -> Result<()> {
     match release {
         ReleaseConfig::Github {
             repository,
             ignore_versions,
-            ..
         } => {
             let mut parts = repository.split('/');
             let owner = parts.next();
@@ -43,7 +37,7 @@ pub(super) fn validate(
             version_pattern,
             ignore_versions,
         } => {
-            validate_url(path, id, url, allow_insecure_transports)?;
+            validate_url(path, id, url)?;
             if version_pattern.is_empty() {
                 return Err(UpdaterError::config(
                     path,
@@ -67,7 +61,7 @@ pub(super) fn validate(
             url,
             version_headers,
         } => {
-            validate_url(path, id, url, allow_insecure_transports)?;
+            validate_url(path, id, url)?;
             if version_headers.is_empty() {
                 return Err(UpdaterError::config(
                     path,
@@ -94,8 +88,6 @@ pub(super) fn validate(
                 }
             }
         }
-        // A manual placeholder only registers the tool; there is nothing to validate.
-        ReleaseConfig::Manual {} => {}
     }
     Ok(())
 }
@@ -105,20 +97,7 @@ pub(super) fn validate_artifacts(
     id: &str,
     release: &ReleaseConfig,
     artifacts: &[ArtifactConfig],
-    allow_insecure_transports: bool,
 ) -> Result<()> {
-    if matches!(release, ReleaseConfig::Manual {}) {
-        if !artifacts.is_empty() {
-            return Err(UpdaterError::config(
-                path,
-                format!(
-                    "tool {id}: manual tools are not auto-updated and must not configure artifacts"
-                ),
-            )
-            .into());
-        }
-        return Ok(());
-    }
     if artifacts.is_empty() {
         return Err(
             UpdaterError::config(path, format!("tool {id}: artifacts must not be empty")).into(),
@@ -127,7 +106,7 @@ pub(super) fn validate_artifacts(
     let mut unique = BTreeSet::new();
     for artifact in artifacts {
         match artifact {
-            ArtifactConfig::GithubAsset { pattern, sha256 } => {
+            ArtifactConfig::GithubAsset { pattern } => {
                 require_release_type(
                     path,
                     id,
@@ -135,9 +114,8 @@ pub(super) fn validate_artifacts(
                     "github-asset requires a GitHub release",
                 )?;
                 validate_regex(path, id, "asset", pattern)?;
-                validate_sha256(path, id, sha256, &["version"])?;
             }
-            ArtifactConfig::GithubAssets { pattern, sha256 } => {
+            ArtifactConfig::GithubAssets { pattern } => {
                 require_release_type(
                     path,
                     id,
@@ -145,9 +123,8 @@ pub(super) fn validate_artifacts(
                     "github-assets requires a GitHub release",
                 )?;
                 validate_regex(path, id, "assets", pattern)?;
-                validate_sha256(path, id, sha256, &[])?;
             }
-            ArtifactConfig::GithubSource { format, sha256 } => {
+            ArtifactConfig::GithubSource { format } => {
                 require_release_type(
                     path,
                     id,
@@ -161,7 +138,6 @@ pub(super) fn validate_artifacts(
                     )
                     .into());
                 }
-                validate_sha256(path, id, sha256, &[])?;
             }
             ArtifactConfig::PageLink { pattern, base_url } => {
                 require_release_type(
@@ -172,14 +148,11 @@ pub(super) fn validate_artifacts(
                 )?;
                 validate_regex(path, id, "link", pattern)?;
                 if let Some(base_url) = base_url {
-                    validate_url(path, id, base_url, allow_insecure_transports)?;
+                    validate_url(path, id, base_url)?;
                 }
             }
-            ArtifactConfig::DirectUrl { url, sha256 } => {
-                validate_url(path, id, url, allow_insecure_transports)?;
-                validate_sha256(path, id, sha256, &[])?;
-            }
-            ArtifactConfig::UrlTemplate { url, sha256 } => {
+            ArtifactConfig::DirectUrl { url } => validate_url(path, id, url)?,
+            ArtifactConfig::UrlTemplate { url } => {
                 if !url.contains("{version}") {
                     return Err(UpdaterError::config(
                         path,
@@ -190,13 +163,7 @@ pub(super) fn validate_artifacts(
                 validate_placeholders(url, &["version"]).map_err(|message| {
                     UpdaterError::config(path, format!("tool {id}: URL template {message}"))
                 })?;
-                validate_sha256(path, id, sha256, &["version"])?;
-                validate_url(
-                    path,
-                    id,
-                    &url.replace("{version}", "v1.0.0"),
-                    allow_insecure_transports,
-                )?;
+                validate_url(path, id, &url.replace("{version}", "v1.0.0"))?;
             }
             ArtifactConfig::ReleaseUrl => require_release_type(
                 path,
@@ -219,17 +186,17 @@ pub(super) fn validate_artifacts(
 
 fn artifact_key(artifact: &ArtifactConfig) -> String {
     match artifact {
-        ArtifactConfig::GithubAsset { pattern, .. } => format!("github-asset\0{pattern}"),
-        ArtifactConfig::GithubAssets { pattern, .. } => format!("github-assets\0{pattern}"),
-        ArtifactConfig::GithubSource { format, .. } => format!("github-source\0{format}"),
+        ArtifactConfig::GithubAsset { pattern } => format!("github-asset\0{pattern}"),
+        ArtifactConfig::GithubAssets { pattern } => format!("github-assets\0{pattern}"),
+        ArtifactConfig::GithubSource { format } => format!("github-source\0{format}"),
         ArtifactConfig::PageLink { pattern, base_url } => {
             format!(
                 "page-link\0{pattern}\0{}",
                 base_url.as_deref().unwrap_or_default()
             )
         }
-        ArtifactConfig::DirectUrl { url, .. } => format!("direct-url\0{url}"),
-        ArtifactConfig::UrlTemplate { url, .. } => format!("url-template\0{url}"),
+        ArtifactConfig::DirectUrl { url } => format!("direct-url\0{url}"),
+        ArtifactConfig::UrlTemplate { url } => format!("url-template\0{url}"),
         ArtifactConfig::ReleaseUrl => "release-url".to_owned(),
     }
 }
@@ -255,56 +222,14 @@ fn validate_regex(path: &Path, id: &str, field: &str, pattern: &str) -> Result<(
     Ok(())
 }
 
-fn validate_url(path: &Path, id: &str, value: &str, allow_insecure_transports: bool) -> Result<()> {
+fn validate_url(path: &Path, id: &str, value: &str) -> Result<()> {
     let parsed = url::Url::parse(value).map_err(|error| {
         UpdaterError::config(path, format!("tool {id}: invalid URL {value:?}: {error}"))
     })?;
-    let scheme_allowed =
-        parsed.scheme() == "https" || (allow_insecure_transports && parsed.scheme() == "http");
-    if !scheme_allowed || parsed.host_str().is_none() {
-        let allowed = if allow_insecure_transports {
-            "HTTP or HTTPS"
-        } else {
-            "HTTPS"
-        };
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
         return Err(UpdaterError::config(
             path,
-            format!("tool {id}: URL {value:?} must use {allowed} and include a host"),
-        )
-        .into());
-    }
-    Ok(())
-}
-
-/// Validates an optional SHA-256 digest. Plain values must be 64 hexadecimal
-/// characters; url-template and github-asset digests may embed the `{version}`
-/// placeholder and cannot be length-checked until the version is known.
-fn validate_sha256(
-    path: &Path,
-    id: &str,
-    value: &Option<String>,
-    allowed_placeholders: &[&str],
-) -> Result<()> {
-    let Some(value) = value else {
-        return Ok(());
-    };
-    validate_placeholders(value, allowed_placeholders).map_err(|message| {
-        UpdaterError::config(path, format!("tool {id}: sha256 template {message}"))
-    })?;
-    let remainder = value.replace("{version}", "");
-    if remainder.bytes().any(|byte| !byte.is_ascii_hexdigit()) {
-        return Err(UpdaterError::config(
-            path,
-            format!(
-                "tool {id}: sha256 must contain only hexadecimal characters outside the {{version}} placeholder"
-            ),
-        )
-        .into());
-    }
-    if !value.contains('{') && remainder.len() != 64 {
-        return Err(UpdaterError::config(
-            path,
-            format!("tool {id}: sha256 must be 64 hexadecimal characters"),
+            format!("tool {id}: URL {value:?} must use HTTP or HTTPS and include a host"),
         )
         .into());
     }

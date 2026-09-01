@@ -7,7 +7,7 @@ use crate::domain::{ArtifactConfig, ResolvedArtifact, ResolvedRelease, Tool};
 use crate::error::UpdaterError;
 use crate::paths::filename_from_url;
 
-use super::util::{decode, expected_sha256, incompatible_artifact, read_body_limited};
+use super::util::{decode, incompatible_artifact};
 
 pub(super) fn resolve(
     client: &Client,
@@ -15,7 +15,6 @@ pub(super) fn resolve(
     page_url: &str,
     version_pattern: &str,
     ignored: &[String],
-    allow_insecure_transports: bool,
 ) -> Result<ResolvedRelease> {
     let response = client
         .get(page_url)
@@ -25,7 +24,10 @@ pub(super) fn resolve(
             tool: tool.id.clone(),
             message: format!("web request failed: {error}"),
         })?;
-    let bytes = read_body_limited(response, tool, page_url)?;
+    let bytes = response.bytes().map_err(|error| UpdaterError::Resolution {
+        tool: tool.id.clone(),
+        message: format!("cannot read web response: {error}"),
+    })?;
     let body = decode(&bytes);
     let regex = Regex::new(version_pattern).map_err(|error| UpdaterError::Resolution {
         tool: tool.id.clone(),
@@ -79,8 +81,8 @@ pub(super) fn resolve(
                         .to_string()
                 }
             }
-            ArtifactConfig::DirectUrl { url, .. } => url.clone(),
-            ArtifactConfig::UrlTemplate { url, .. } => url.replace("{version}", &version),
+            ArtifactConfig::DirectUrl { url } => url.clone(),
+            ArtifactConfig::UrlTemplate { url } => url.replace("{version}", &version),
             ArtifactConfig::GithubAsset { .. } => {
                 return Err(incompatible_artifact(tool, "github-asset").into());
             }
@@ -99,13 +101,9 @@ pub(super) fn resolve(
         } else {
             filename_from_url(&resolved_url)
         };
-        if matches!(artifact, ArtifactConfig::PageLink { .. }) {
-            validate_scraped_url(tool, &resolved_url, allow_insecure_transports)?;
-        }
         artifacts.push(ResolvedArtifact {
             filename,
             url: resolved_url,
-            expected_sha256: expected_sha256(artifact, &version),
         });
     }
     Ok(ResolvedRelease { version, artifacts })
@@ -115,48 +113,9 @@ fn normalize_page_link(value: &str) -> String {
     value.replace("\\/", "/").replace("&amp;", "&")
 }
 
-/// Runtime re-validation for URLs scraped out of page bodies, mirroring the
-/// config-time URL rules: HTTPS only unless the manifest opts into insecure
-/// transports, and the host must be present.
-fn validate_scraped_url(
-    tool: &Tool,
-    value: &str,
-    allow_insecure_transports: bool,
-) -> std::result::Result<(), UpdaterError> {
-    let rejection = |reason: String| UpdaterError::Resolution {
-        tool: tool.id.clone(),
-        message: format!("scraped download URL {value:?} rejected: {reason}"),
-    };
-    let parsed = match Url::parse(value) {
-        Ok(parsed) => parsed,
-        Err(error) => return Err(rejection(format!("invalid URL: {error}"))),
-    };
-    let scheme_allowed =
-        parsed.scheme() == "https" || (allow_insecure_transports && parsed.scheme() == "http");
-    if !scheme_allowed || parsed.host_str().is_none_or(str::is_empty) {
-        let allowed = if allow_insecure_transports {
-            "HTTP or HTTPS"
-        } else {
-            "HTTPS"
-        };
-        return Err(rejection(format!(
-            "URL must use {allowed} and include a host"
-        )));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
-    use crate::test_support::tool as test_tool;
-
-    use super::{normalize_page_link, validate_scraped_url};
-
-    fn tool() -> crate::domain::Tool {
-        test_tool("demo", PathBuf::from("/toolkit/demo"))
-    }
+    use super::normalize_page_link;
 
     #[test]
     fn normalizes_json_and_html_escaped_page_links() {
@@ -166,36 +125,5 @@ mod tests {
             ),
             "https://gobies.org/download/release?type=full_url&id=355"
         );
-    }
-
-    #[test]
-    fn rejects_scraped_page_links_that_are_not_https() {
-        let error =
-            validate_scraped_url(&tool(), "http://example.com/tool.zip", false).unwrap_err();
-        assert!(
-            error.to_string().contains("http://example.com/tool.zip"),
-            "expected the rejected URL in the error, got {error}"
-        );
-        assert!(
-            error.to_string().contains("HTTPS"),
-            "expected the scheme reason, got {error}"
-        );
-    }
-
-    #[test]
-    fn allows_plain_http_scraped_page_links_only_when_opted_in() {
-        assert!(validate_scraped_url(&tool(), "http://example.com/tool.zip", true).is_ok());
-        assert!(validate_scraped_url(&tool(), "https://example.com/tool.zip", false).is_ok());
-    }
-
-    #[test]
-    fn rejects_scraped_page_links_without_a_host() {
-        for url in ["file:///C:/tool.zip", "javascript:alert(1)"] {
-            let error = validate_scraped_url(&tool(), url, false).unwrap_err();
-            assert!(
-                error.to_string().contains("include a host"),
-                "expected a host rejection for {url}, got {error}"
-            );
-        }
     }
 }

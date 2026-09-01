@@ -5,8 +5,8 @@ use anyhow::{Result, bail};
 use toml::Value;
 
 use crate::config::model::{
-    ArtifactConfig, EnvironmentMode, ExistingPolicy, HookAction, HookConfig, HookWorkingDirectory,
-    InputMode, InstallConfig, OutputMode, ReleaseConfig, SCHEMA_VERSION, SymlinkConfig, ToolConfig,
+    ArtifactConfig, ExistingPolicy, HookAction, HookConfig, HookWorkingDirectory, InputMode,
+    InstallConfig, OutputMode, ReleaseConfig, SCHEMA_VERSION, SymlinkConfig, ToolConfig,
 };
 
 pub(super) fn convert_tool(
@@ -19,7 +19,6 @@ pub(super) fn convert_tool(
         "github" => ReleaseConfig::Github {
             repository: required_string(legacy, "url", name)?.to_owned(),
             ignore_versions: ignored,
-            allow_prereleases: false,
         },
         "web" | "format" => ReleaseConfig::Web {
             url: required_string(legacy, "url", name)?.to_owned(),
@@ -41,7 +40,6 @@ pub(super) fn convert_tool(
     if let Some(format) = string(legacy, "release_src") {
         artifacts.push(ArtifactConfig::GithubSource {
             format: format.to_owned(),
-            sha256: None,
         });
     }
     if artifacts.is_empty() {
@@ -66,7 +64,6 @@ pub(super) fn convert_tool(
             .into_iter()
             .map(PathBuf::from)
             .collect(),
-        allow_symlinks_in_archive: false,
         symlinks: symlinks(legacy, name)?,
     };
     let hooks = HookConfig {
@@ -92,17 +89,13 @@ fn artifacts(
     Ok(match source_type {
         "github" => strings(legacy, "re_download")
             .into_iter()
-            .map(|pattern| ArtifactConfig::GithubAsset {
-                pattern,
-                sha256: None,
-            })
+            .map(|pattern| ArtifactConfig::GithubAsset { pattern })
             .collect(),
         "web" => {
             let patterns = strings(legacy, "re_download");
             if patterns.is_empty() {
                 vec![ArtifactConfig::DirectUrl {
                     url: required_string(legacy, "update_url", name)?.to_owned(),
-                    sha256: None,
                 }]
             } else {
                 let base_url = string(legacy, "update_url").map(ToOwned::to_owned);
@@ -117,7 +110,7 @@ fn artifacts(
         }
         "format" => strings(legacy, "format_url")
             .into_iter()
-            .map(|url| ArtifactConfig::UrlTemplate { url, sha256: None })
+            .map(|url| ArtifactConfig::UrlTemplate { url })
             .collect(),
         "http" => vec![ArtifactConfig::ReleaseUrl],
         _ => unreachable!("source type validated while converting release"),
@@ -158,7 +151,6 @@ fn hook(table: &toml::map::Map<String, Value>, field: &str, tool: &str) -> Resul
         args: Vec::new(),
         timeout_seconds: 300,
         working_directory: HookWorkingDirectory::Toolkit,
-        environment_mode: EnvironmentMode::default(),
         environment: BTreeMap::new(),
     }])
 }
@@ -166,16 +158,14 @@ fn hook(table: &toml::map::Map<String, Value>, field: &str, tool: &str) -> Resul
 pub(super) fn normalize_destination(value: &str) -> PathBuf {
     // 旧部署使用固定的 Unix 根路径；迁移已知根路径到可移植的工具包布局，其他用户路径保持不变。
     let normalized = value.replace('\\', "/");
-    // String concatenation keeps the portable forward-slash form on Windows,
-    // where PathBuf::join would re-serialize with a platform separator.
     if let Some(value) = normalized.strip_prefix("../../") {
         return PathBuf::from(value);
     }
     if let Some(value) = normalized.strip_prefix("/opt/tools/") {
-        return PathBuf::from(format!("Tools/{value}"));
+        return PathBuf::from("Tools").join(value);
     }
     if let Some(value) = normalized.strip_prefix("/opt/apps/") {
-        return PathBuf::from(format!("Apps/{value}"));
+        return PathBuf::from("Apps").join(value);
     }
     if let Some(value) = normalized.strip_prefix("/opt/") {
         return PathBuf::from(value);
@@ -187,7 +177,7 @@ pub(super) fn normalize_symlink_target(value: &str) -> PathBuf {
     let normalized = value.replace('\\', "/");
     normalized
         .strip_prefix("/opt/binary/")
-        .map(|value| PathBuf::from(format!("bin/{value}")))
+        .map(|value| PathBuf::from("bin").join(value))
         .unwrap_or_else(|| PathBuf::from(normalized))
 }
 

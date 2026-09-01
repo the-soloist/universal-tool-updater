@@ -7,7 +7,8 @@ use crate::error::UpdaterError;
 pub fn expand_path(raw: &Path) -> Result<PathBuf, UpdaterError> {
     let text = raw.to_string_lossy();
     if text == "~" || text.starts_with("~/") || text.starts_with("~\\") {
-        let home = select_home(std::env::var_os("USERPROFILE"), std::env::var_os("HOME"))
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
             .ok_or_else(|| UpdaterError::config(raw, "cannot determine the user home directory"))?;
         if text.len() == 1 {
             return Ok(PathBuf::from(home));
@@ -15,24 +16,6 @@ pub fn expand_path(raw: &Path) -> Result<PathBuf, UpdaterError> {
         return Ok(PathBuf::from(home).join(&text[2..]));
     }
     Ok(raw.to_path_buf())
-}
-
-/// Windows resolves the user home from USERPROFILE first (HOME is often a
-/// Git-Bash override pointing elsewhere); Unix keeps HOME-only semantics.
-#[cfg(windows)]
-fn select_home(
-    userprofile: Option<std::ffi::OsString>,
-    home: Option<std::ffi::OsString>,
-) -> Option<std::ffi::OsString> {
-    userprofile.or(home)
-}
-
-#[cfg(not(windows))]
-fn select_home(
-    _userprofile: Option<std::ffi::OsString>,
-    home: Option<std::ffi::OsString>,
-) -> Option<std::ffi::OsString> {
-    home
 }
 
 pub fn resolve_from(base: &Path, raw: &Path) -> Result<PathBuf, UpdaterError> {
@@ -148,7 +131,7 @@ pub fn is_portable_relative_path(path: &Path, allow_current: bool) -> bool {
         })
 }
 
-pub(crate) fn is_portable_component(value: &str, allow_wildcards: bool) -> bool {
+fn is_portable_component(value: &str, allow_wildcards: bool) -> bool {
     if value.is_empty()
         || value.ends_with([' ', '.'])
         || value.chars().any(|character| {
@@ -181,34 +164,7 @@ mod tests {
     use super::{
         filename_from_url, installation_backup_path, is_portable_filename,
         is_portable_filename_pattern, is_portable_relative_path, normalize_path, safe_filename,
-        select_home,
     };
-
-    #[test]
-    fn resolves_the_windows_home_from_userprofile_first() {
-        #[cfg(windows)]
-        {
-            let userprofile = Some(std::ffi::OsString::from(r"C:\Users\demo"));
-            let home = Some(std::ffi::OsString::from(
-                r"C:\Users\demo\AppData\Local\Programs\Git\home",
-            ));
-            assert_eq!(select_home(userprofile.clone(), home.clone()), userprofile);
-            assert_eq!(
-                select_home(None, home.clone()),
-                Some(std::ffi::OsString::from(
-                    r"C:\Users\demo\AppData\Local\Programs\Git\home"
-                ))
-            );
-            assert!(select_home(userprofile, None).is_some());
-        }
-        #[cfg(not(windows))]
-        {
-            let userprofile = Some(std::ffi::OsString::from("/home/demo"));
-            let home = Some(std::ffi::OsString::from("/real/home"));
-            assert_eq!(select_home(userprofile, home.clone()), home);
-            assert_eq!(select_home(None, None), None);
-        }
-    }
 
     #[test]
     fn removes_parent_components_from_filenames() {

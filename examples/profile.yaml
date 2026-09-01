@@ -8,9 +8,6 @@
 # 工具 ID 必须使用小写 kebab-case。示例工具默认禁用，避免误下载。
 tools:
   # GitHub Release：匹配一个压缩资产，解压并保存为目录。
-  # prerelease 默认被跳过；仅配置 token 走 API 解析时该过滤生效，
-  # 无 token 的 atom 路径无法识别 prerelease。需要预发布版时
-  # 设置 allow_prereleases: true。
   example-github-directory:
     name: ExampleGitHubDirectory
     enabled: false
@@ -19,14 +16,9 @@ tools:
       repository: sharkdp/bat
       ignore_versions:
         - v0.24.0
-      # allow_prereleases: true
     artifacts:
       - type: github-asset
         pattern: '^bat-v[^/]+-x86_64-pc-windows-msvc\.zip$'
-        # 可选的完整性固定（pin）：64 位十六进制摘要会在安装前核对，
-        # 不匹配时按下载失败处理；github-asset 的 sha256 支持 {version}
-        # 占位符，github-assets / github-source 仅接受静态值。
-        # sha256: 2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae
     install:
       destination: Examples/GitHub/Directory
       input: extract
@@ -86,16 +78,12 @@ tools:
           to: example-tool.exe
 
       # 必须使用外部逻辑时只允许 Python 3；启用前确保脚本真实存在。
-      # environment_mode 默认 minimal：子进程只保留 PATH/SYSTEMROOT/TEMP/
-      # TMP/TZ + UTU_* 保留变量 + environment 配置变量；需要完整继承时
-      # 显式改为 inherit。
       # before_update:
       #   - type: python
       #     script: scripts/custom/prepare.py
       #     args: [--strict]
       #     timeout_seconds: 60
       #     working_directory: toolkit
-      #     environment_mode: minimal
       #     environment:
       #       MODE: portable
 
@@ -115,41 +103,5 @@ tools:
     install:
       destination: Examples/HTTP/File
       input: copy
-      existing: replace
-      save: directory
-
-  # Manual 占位：登记无法自动更新的工具（付费授权、需登录论坛下载等）。
-  # updater 永不解析版本、不下载安装；update 汇总显示 skipped
-  # （managed manually; not auto-updated），list 输出带 [manual] 标注。
-  # destination 仍参与目录冲突检测，防止其他工具占用该目录；
-  # artifacts 必须为空列表。此类工具可以安全地保持 enabled: true。
-  ida-pro:
-    name: IDA Pro
-    enabled: true
-    release:
-      type: manual
-    artifacts: []
-    install:
-      destination: Reverse/Decompiler/IDAPro
-
-  # URL 模板 + sha256 校验：可选的 64 位十六进制摘要会在安装前核对，
-  # 不匹配时按下载失败处理并清除断点缓存；url-template 的 sha256 支持
-  # {version} 占位符。所有 URL 默认必须使用 HTTPS，如需放行 HTTP 明文
-  # 下载，必须在 manifest.yaml 顶层设置 allow_insecure_transports: true。
-  example-url-template-sha256:
-    name: ExampleUrlTemplateSha256
-    enabled: false
-    release:
-      type: web
-      url: https://example.com/downloads/
-      version_pattern: 'Latest version:\s*([0-9]+\.[0-9]+\.[0-9]+)'
-    artifacts:
-      - type: url-template
-        url: 'https://example.com/releases/{version}/example-tool-{version}.zip'
-        # 占位符外的其余字符仍必须是十六进制；版本解析后先渲染再比对。
-        sha256: '000000000000000000000000000000000000000000000000000000{version}'
-    install:
-      destination: Examples/Web/Checksummed
-      input: extract
       existing: replace
       save: directory
