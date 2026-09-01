@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use crate::archive::ExtractionLimits;
 use crate::config::{AppConfig, Paths};
 use crate::display::width as display_width;
 use crate::domain::{InputMode, NetworkConfig, ReleaseConfig, Tool};
@@ -64,6 +65,7 @@ fn config() -> AppConfig {
             state: PathBuf::from("/toolkit/.updater/state.yaml"),
         },
         network: NetworkConfig::default(),
+        extraction_limits: ExtractionLimits::default(),
         tools,
     }
 }

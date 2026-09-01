@@ -72,7 +72,7 @@ fn keeps_github_copy_artifacts_uncompressed_and_records_release_version() {
     fs::create_dir_all(&destination).unwrap();
     fs::write(destination.parent().unwrap().join(".version"), "v1\n").unwrap();
 
-    let archive_service = ArchiveService;
+    let archive_service = ArchiveService::default();
     archive_service
         .compress_7z(&old_content, &destination.join("Demo-v1.7z"))
         .unwrap();
@@ -177,7 +177,7 @@ fn rebuilds_an_unchecked_corrupt_merge_archive() {
     let artifact = downloads.join("demo.7z");
     fs::create_dir(&payload).unwrap();
     fs::write(payload.join("new.bin"), "new").unwrap();
-    let archive_service = ArchiveService;
+    let archive_service = ArchiveService::default();
     archive_service.compress_7z(&payload, &artifact).unwrap();
 
     let mut tool = test_tool("demo", destination.clone());
@@ -225,7 +225,7 @@ fn directory_output_records_version_inside_destination() {
     fs::create_dir(&payload).unwrap();
     fs::write(payload.join("demo.bin"), "demo").unwrap();
     let artifact = downloads.join("demo.7z");
-    let archive_service = ArchiveService;
+    let archive_service = ArchiveService::default();
     archive_service.compress_7z(&payload, &artifact).unwrap();
 
     let mut tool = test_tool("demo", destination.clone());

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use crate::archive::ExtractionLimits;
 use crate::domain::{NetworkConfig, Tool};
 
 #[derive(Debug)]
@@ -8,6 +9,7 @@ pub struct AppConfig {
     pub app_root: PathBuf,
     pub paths: Paths,
     pub network: NetworkConfig,
+    pub extraction_limits: ExtractionLimits,
     pub tools: BTreeMap<String, Tool>,
 }
 

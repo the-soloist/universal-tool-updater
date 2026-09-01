@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::archive::ExtractionLimits;
 pub use crate::domain::{
     ArtifactConfig, ExistingPolicy, HookAction, HookConfig, HookWorkingDirectory, InputMode,
     NetworkConfig, OutputMode, ReleaseConfig,
@@ -20,6 +21,9 @@ pub struct ManifestFile {
     pub network: NetworkConfig,
     #[serde(default)]
     pub defaults: DefaultsConfig,
+    /// 解压与下载的累计配额；省略时使用默认值 8 GiB / 100000 条目。
+    #[serde(default, skip_serializing_if = "ExtractionLimits::is_default")]
+    pub extraction_limits: ExtractionLimits,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

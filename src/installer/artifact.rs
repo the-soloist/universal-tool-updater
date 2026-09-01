@@ -31,12 +31,17 @@ impl<'a> ArtifactPreparer<'a> {
         fs::create_dir_all(&output)?;
         match tool.install.input {
             InputMode::Extract if self.archive.is_supported(&artifact.path) => {
-                self.archive.extract(
+                self.archive.extract_for_tool(
+                    &tool.id,
                     &artifact.path,
                     &output,
                     tool.install.archive_password.as_deref(),
                 )?;
-                self.extract_nested_archive(&output, tool.install.archive_password.as_deref())?;
+                self.extract_nested_archive(
+                    &tool.id,
+                    &output,
+                    tool.install.archive_password.as_deref(),
+                )?;
             }
             InputMode::Extract | InputMode::Copy => {
                 let name = artifact
@@ -52,7 +57,12 @@ impl<'a> ArtifactPreparer<'a> {
         Ok(output)
     }
 
-    fn extract_nested_archive(&self, directory: &Path, password: Option<&str>) -> Result<()> {
+    fn extract_nested_archive(
+        &self,
+        tool_id: &str,
+        directory: &Path,
+        password: Option<&str>,
+    ) -> Result<()> {
         let entries = fs::read_dir(directory)?.collect::<std::result::Result<Vec<_>, _>>()?;
         if entries.len() != 1 {
             return Ok(());
@@ -61,7 +71,8 @@ impl<'a> ArtifactPreparer<'a> {
         if !nested.is_file() || !self.archive.is_supported(&nested) {
             return Ok(());
         }
-        self.archive.extract(&nested, directory, password)?;
+        self.archive
+            .extract_for_tool(tool_id, &nested, directory, password)?;
         fs::remove_file(nested)?;
         Ok(())
     }
@@ -97,7 +108,7 @@ mod tests {
         let unpacked = directory.path().join("unpacked");
         fs::create_dir(&unpacked).unwrap();
         let tool = test_tool("nested", directory.path().join("destination"));
-        let prepared = ArtifactPreparer::new(&ArchiveService, &unpacked)
+        let prepared = ArtifactPreparer::new(&ArchiveService::default(), &unpacked)
             .prepare(&tool, &DownloadedArtifact { path: outer }, 0)
             .unwrap();
 

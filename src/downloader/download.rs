@@ -27,7 +27,6 @@ use super::partial::{
 use super::recovery::recover_previous_download;
 
 const HASH_CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024;
-const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_RESTARTS: usize = 3;
 
 pub struct Downloader {
@@ -36,15 +35,9 @@ pub struct Downloader {
 }
 
 impl Downloader {
-    pub fn new(client: Client) -> Self {
-        Self {
-            client,
-            max_download_bytes: DEFAULT_MAX_DOWNLOAD_BYTES,
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn with_max_download_bytes(client: Client, max_download_bytes: u64) -> Self {
+    /// 下载上限与解压配额的 `extraction_limits.max_total_bytes` 联动：
+    /// 声明的 Content-Length（或续传完整大小）超限即在传输前拒绝。
+    pub fn new(client: Client, max_download_bytes: u64) -> Self {
         Self {
             client,
             max_download_bytes,

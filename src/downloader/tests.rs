@@ -10,6 +10,7 @@ use reqwest::blocking::Client;
 use sha2::{Digest, Sha256};
 use tempfile::{TempDir, tempdir};
 
+use crate::archive::ExtractionLimits;
 use crate::config::model::{ArtifactConfig, InputMode, ReleaseConfig};
 use crate::domain::{DownloadedArtifact, ResolvedArtifact, Tool};
 use crate::progress::ProgressManager;
@@ -257,7 +258,7 @@ fn recovers_a_completed_artifact_from_an_interrupted_run() {
         .unwrap();
     let progress = ProgressManager::new(false, 1);
     let task_progress = progress.task("test", "Resume");
-    let downloaded = Downloader::new(client)
+    let downloaded = Downloader::new(client, ExtractionLimits::default().max_total_bytes)
         .download(
             &tool,
             "1.0.0",
@@ -312,7 +313,7 @@ fn does_not_recover_an_unversioned_artifact_from_an_old_run() {
         .unwrap();
     let progress = ProgressManager::new(false, 1);
     let task_progress = progress.task("test", "Resume");
-    let downloaded = Downloader::new(client)
+    let downloaded = Downloader::new(client, ExtractionLimits::default().max_total_bytes)
         .download(
             &tool,
             "opaque-version",
@@ -402,7 +403,7 @@ fn rejects_chunked_responses_that_exceed_the_download_ceiling() {
         .unwrap();
     let progress = ProgressManager::new(false, 1);
     let task_progress = progress.task("test", "Limit");
-    let error = Downloader::with_max_download_bytes(client, 64)
+    let error = Downloader::new(client, 64)
         .download(
             &fixture.tool,
             "1.0.0",
@@ -533,7 +534,7 @@ impl DownloadFixture {
             .unwrap();
         let progress = ProgressManager::new(false, 1);
         let task_progress = progress.task("test", "Resume");
-        Downloader::new(client).download(
+        Downloader::new(client, ExtractionLimits::default().max_total_bytes).download(
             &self.tool,
             "1.0.0",
             &ResolvedArtifact {
