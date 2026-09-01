@@ -6,8 +6,8 @@
 
 - `src/` 同时包含库和二进制入口；共享逻辑放在库模块，命令行启动和日志初始化位于 `src/main.rs`。
 - `build.sh` 是本地和 CI 共用的发布构建入口，使用 `--locked --release`，不要绕过脚本添加另一套构建逻辑。
-- 发布目标为 Linux `x86_64`/`aarch64` musl、Windows `x86_64` GNU/`aarch64` MSVC，以及 macOS `x86_64`/`aarch64`。macOS 分架构构建，不再生成 Universal 二进制。
-- Linux ARM64 交叉构建使用 Zig 和 `cargo-zigbuild`；Windows ARM64 由 Windows CI 验证。除非明确要求，不要在 macOS 上强行链接 Windows ARM64。
+- 发布目标为 Linux `x86_64`/`aarch64` musl、Windows `x86_64`/`aarch64` MSVC，以及 macOS `x86_64`/`aarch64`。macOS 分架构构建，不再生成 Universal 二进制。
+- Linux ARM64 交叉构建使用 Zig 和 `cargo-zigbuild`；Windows MSVC 目标由 Windows CI 验证。除非明确要求，不要在 macOS 上强行链接 Windows 目标。
 - 自更新资产名称必须与 `.github/workflows/release.yml` 和 `src/self_update.rs` 的平台映射保持一致；修改平台时同步更新 README 和对应测试。
 
 # CODING GUIDE

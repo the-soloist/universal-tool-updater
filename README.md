@@ -289,7 +289,7 @@ updater self-update --status
 
 - Linux x86_64 musl
 - Linux ARM64 musl
-- Windows x86_64 GNU
+- Windows x86_64 MSVC
 - Windows ARM64 MSVC
 - macOS x86_64
 - macOS ARM64
@@ -305,14 +305,14 @@ updater self-update --status
 # 指定 Rust target
 ./build.sh --target x86_64-unknown-linux-musl
 ./build.sh --target aarch64-unknown-linux-musl
-./build.sh --target x86_64-pc-windows-gnu
+./build.sh --target x86_64-pc-windows-msvc
 ./build.sh --target aarch64-pc-windows-msvc
 ./build.sh --target aarch64-apple-darwin
 ./build.sh --target x86_64-apple-darwin
 
 ```
 
-Linux ARM64 musl 交叉构建需要 Zig 和 `cargo-zigbuild`；脚本会自动使用 Zig 构建该目标。Windows ARM64 使用 `aarch64-pc-windows-msvc`，Windows x86_64 使用 `x86_64-pc-windows-gnu`。macOS 两个架构分别构建，不再合并为 Universal 产物。
+Linux ARM64 musl 交叉构建需要 Zig 和 `cargo-zigbuild`；脚本会自动使用 Zig 构建该目标。Windows ARM64 使用 `aarch64-pc-windows-msvc`，Windows x86_64 使用 `x86_64-pc-windows-msvc`。macOS 两个架构分别构建，不再合并为 Universal 产物。
 
 ```text
 target/aarch64-unknown-linux-musl/release/updater

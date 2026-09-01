@@ -16,7 +16,7 @@ Examples:
   ./build.sh
   ./build.sh --target x86_64-unknown-linux-musl
   ./build.sh --target aarch64-unknown-linux-musl
-  ./build.sh --target x86_64-pc-windows-gnu
+  ./build.sh --target x86_64-pc-windows-msvc
   ./build.sh --target aarch64-pc-windows-msvc
   ./build.sh --target x86_64-apple-darwin
 EOF
@@ -61,12 +61,8 @@ if [[ -n "$target" ]]; then
     artifact_dir="target/$target/release"
 fi
 host_os="$(uname -s)"
-host_is_windows=false
-if [[ "${OS:-}" == "Windows_NT" || "$host_os" == MINGW* || "$host_os" == MSYS* || "$host_os" == CYGWIN* ]]; then
-    host_is_windows=true
-fi
 
-if [[ "$target" == "aarch64-unknown-linux-musl" || ("$target" == *linux* && "$host_os" != "Linux") || ("$target" == *windows-gnu && "$host_is_windows" != true) ]]; then
+if [[ "$target" == "aarch64-unknown-linux-musl" || ("$target" == *linux* && "$host_os" != "Linux") ]]; then
     if command -v cargo-zigbuild >/dev/null 2>&1; then
         cargo_command=(cargo zigbuild)
     else
