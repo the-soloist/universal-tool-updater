@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::io::{ErrorKind, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -28,7 +29,19 @@ pub(super) fn run(
     })?;
     let mut missing = Vec::new();
     let mut incompatible = Vec::new();
+    let mut rejected = Vec::new();
+    let path_var = std::env::var_os("PATH");
     for interpreter in python_candidates() {
+        if let Some(resolved) =
+            rejected_interpreter_path(&interpreter.program, path_var.as_deref(), context)
+        {
+            tracing::warn!(
+                interpreter = %resolved.display(),
+                "skipping Python interpreter inside a managed directory"
+            );
+            rejected.push(interpreter.name());
+            continue;
+        }
         match interpreter.probe() {
             Ok(true) => {}
             Ok(false) => {
@@ -82,9 +95,10 @@ pub(super) fn run(
         }
     }
     bail!(
-        "Python 3 interpreter not found; missing [{}], incompatible [{}]; set UTU_PYTHON to a Python 3 interpreter path",
+        "Python 3 interpreter not found; missing [{}], incompatible [{}], rejected [{}]; set UTU_PYTHON to a Python 3 interpreter path outside the toolkit and downloads directories",
         missing.join(", "),
-        incompatible.join(", ")
+        incompatible.join(", "),
+        rejected.join(", ")
     )
 }
 
@@ -270,6 +284,50 @@ fn python_candidates() -> Vec<PythonInterpreter> {
         .collect()
 }
 
+fn resolve_program_path(program: &OsStr, path_var: Option<&OsStr>) -> Option<PathBuf> {
+    let program = Path::new(program);
+    if program
+        .parent()
+        .is_some_and(|parent| !parent.as_os_str().is_empty())
+    {
+        return fs::canonicalize(program).ok();
+    }
+    let path_var = path_var?;
+    std::env::split_paths(path_var)
+        .find_map(|directory| probe_program_in(&directory, program))
+        .and_then(|candidate| fs::canonicalize(&candidate).ok())
+}
+
+fn probe_program_in(directory: &Path, program: &Path) -> Option<PathBuf> {
+    let direct = directory.join(program);
+    if direct.is_file() {
+        return Some(direct);
+    }
+    #[cfg(windows)]
+    if program.extension().is_none() {
+        let executable = directory.join(format!("{}.exe", program.to_string_lossy()));
+        if executable.is_file() {
+            return Some(executable);
+        }
+    }
+    None
+}
+
+fn rejected_interpreter_path(
+    program: &OsStr,
+    path_var: Option<&OsStr>,
+    context: &HookContext<'_>,
+) -> Option<PathBuf> {
+    resolve_program_path(program, path_var).filter(|resolved| {
+        [context.toolkit_root, context.downloads]
+            .iter()
+            .any(|root| {
+                let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+                resolved.starts_with(canonical)
+            })
+    })
+}
+
 fn working_directory_path<'a>(
     working_directory: HookWorkingDirectory,
     context: &'a HookContext<'_>,
@@ -280,6 +338,93 @@ fn working_directory_path<'a>(
         HookWorkingDirectory::Downloads => Some(context.downloads),
         HookWorkingDirectory::Staging => context.staging,
         HookWorkingDirectory::Install => Some(context.install),
+    }
+}
+
+#[cfg(test)]
+mod path_boundary_tests {
+    use std::ffi::OsStr;
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::{rejected_interpreter_path, resolve_program_path};
+    use crate::hooks::HookContext;
+
+    fn context<'a>(
+        toolkit: &'a std::path::Path,
+        downloads: &'a std::path::Path,
+    ) -> HookContext<'a> {
+        HookContext {
+            app_root: toolkit,
+            toolkit_root: toolkit,
+            downloads,
+            staging: None,
+            install: toolkit,
+            version: None,
+        }
+    }
+
+    #[test]
+    fn resolves_bare_program_names_through_the_provided_path() {
+        let root = tempdir().unwrap();
+        let toolkit = root.path().join("toolkit");
+        let system = root.path().join("system");
+        let downloads = root.path().join("downloads");
+        fs::create_dir_all(&toolkit).unwrap();
+        fs::create_dir_all(&system).unwrap();
+        fs::create_dir_all(&downloads).unwrap();
+        fs::write(system.join("python3"), b"").unwrap();
+        let path_var = std::env::join_paths([&toolkit, &system]).unwrap();
+
+        let resolved = resolve_program_path(OsStr::new("python3"), Some(&path_var)).unwrap();
+        assert!(resolved.ends_with("python3"));
+        assert!(
+            rejected_interpreter_path(
+                OsStr::new("python3"),
+                Some(&path_var),
+                &context(&toolkit, &downloads)
+            )
+            .is_none()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn appends_the_executable_extension_when_searching_the_path() {
+        let root = tempdir().unwrap();
+        let bin = root.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("python.exe"), b"").unwrap();
+        let path_var = std::env::join_paths([&bin]).unwrap();
+
+        let resolved = resolve_program_path(OsStr::new("python"), Some(&path_var)).unwrap();
+        assert!(resolved.ends_with("python.exe"));
+    }
+
+    #[test]
+    fn rejects_candidates_resolved_inside_managed_roots() {
+        let root = tempdir().unwrap();
+        let toolkit = root.path().join("toolkit");
+        let downloads = root.path().join("downloads");
+        let toolkit_bin = toolkit.join("bin");
+        fs::create_dir_all(&toolkit_bin).unwrap();
+        fs::create_dir_all(&downloads).unwrap();
+        let program = if cfg!(windows) {
+            "python.exe"
+        } else {
+            "python"
+        };
+        fs::write(toolkit_bin.join(program), b"").unwrap();
+        let path_var = std::env::join_paths([&toolkit_bin]).unwrap();
+
+        let rejected = rejected_interpreter_path(
+            OsStr::new("python"),
+            Some(&path_var),
+            &context(&toolkit, &downloads),
+        )
+        .unwrap();
+        assert!(rejected.starts_with(toolkit.canonicalize().unwrap()));
     }
 }
 

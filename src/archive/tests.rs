@@ -224,6 +224,36 @@ fn recognizes_every_documented_archive_extension_case_insensitively() {
     assert!(!ArchiveService.is_supported(Path::new("tool.exe")));
 }
 
+#[cfg(unix)]
+#[test]
+fn strips_privilege_bits_from_zip_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempdir().unwrap();
+    let archive_path = directory.path().join("privileged.zip");
+    let output_path = directory.path().join("output");
+    let file = fs::File::create(&archive_path).unwrap();
+    let mut archive = zip::ZipWriter::new(file);
+    archive
+        .start_file(
+            "tool",
+            SimpleFileOptions::default().unix_permissions(0o4755),
+        )
+        .unwrap();
+    archive.write_all(b"tool").unwrap();
+    archive.finish().unwrap();
+
+    ArchiveService
+        .extract(&archive_path, &output_path, None)
+        .unwrap();
+
+    let mode = fs::metadata(output_path.join("tool"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o7777, 0o755);
+}
+
 fn tar_fixture() -> Vec<u8> {
     let mut output = Vec::new();
     {

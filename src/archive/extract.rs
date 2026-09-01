@@ -229,7 +229,7 @@ fn lzma_error(archive: &Path, message: String) -> UpdaterError {
 fn set_zip_permissions(output: &Path, entry: &ZipFile<'_>) -> Result<()> {
     if let Some(mode) = entry.unix_mode() {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(output, fs::Permissions::from_mode(mode))?;
+        fs::set_permissions(output, fs::Permissions::from_mode(mode & 0o777))?;
     }
     Ok(())
 }
