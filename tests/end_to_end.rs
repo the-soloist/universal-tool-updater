@@ -105,6 +105,7 @@ fn resolves_downloads_and_repairs_a_corrupt_merge_archive() {
             ..NetworkConfig::default()
         },
         defaults,
+        allow_insecure_transports: true,
     };
     let manifest_path = config_dir.join("manifest.yaml");
     fs::write(&manifest_path, yaml_serde::to_string(&manifest).unwrap()).unwrap();
@@ -264,6 +265,7 @@ fn runs_complete_tool_updates_in_parallel() {
             ..NetworkConfig::default()
         },
         defaults,
+        allow_insecure_transports: true,
     };
     let manifest_path = config_dir.join("manifest.yaml");
     fs::write(&manifest_path, yaml_serde::to_string(&manifest).unwrap()).unwrap();

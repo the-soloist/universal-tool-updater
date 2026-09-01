@@ -33,7 +33,13 @@ pub fn load(manifest_path: &Path) -> Result<AppConfig> {
             return Err(UpdaterError::config(&path, "tools must not be empty").into());
         }
         for (id, raw) in tool_file.tools {
-            validate_tool_config(&path, &id, &raw, &app_root)?;
+            validate_tool_config(
+                &path,
+                &id,
+                &raw,
+                &app_root,
+                manifest.allow_insecure_transports,
+            )?;
             registry.ensure_unique_id(&path, &id)?;
             let tool =
                 tool::materialize(&path, id, profile.clone(), raw, &manifest.defaults, &paths)?;

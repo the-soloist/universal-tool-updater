@@ -472,7 +472,7 @@ tools:
     install:
       destination: Demo
 "#,
-        "must use HTTP or HTTPS",
+        "must use HTTPS",
     );
     assert_invalid_tool(
         r#"
@@ -1031,5 +1031,224 @@ fn assert_invalid_tool_with_manifest(manifest: &str, tool_file: &str, expected: 
     assert!(
         error.to_string().contains(expected),
         "expected {expected:?}, got {error:#}"
+    );
+}
+
+#[test]
+fn rejects_plain_http_urls_by_default() {
+    assert_invalid_tool(
+        r#"
+tools:
+  demo:
+    release:
+      type: web
+      url: http://example.com/releases
+      version_pattern: 'version=(.+)'
+    artifacts:
+      - type: page-link
+        pattern: 'href="([^"]+)"'
+    install:
+      destination: Demo
+"#,
+        "URL \"http://example.com/releases\" must use HTTPS and include a host; \
+         set allow_insecure_transports: true",
+    );
+    assert_invalid_tool(
+        r#"
+tools:
+  demo:
+    release:
+      type: http
+      url: http://example.com/demo.zip
+      version_headers: [etag]
+    artifacts:
+      - type: release-url
+    install:
+      destination: Demo
+"#,
+        "URL \"http://example.com/demo.zip\" must use HTTPS",
+    );
+    assert_invalid_tool(
+        r#"
+tools:
+  demo:
+    release:
+      type: web
+      url: https://example.com/releases
+      version_pattern: 'version=(.+)'
+    artifacts:
+      - type: page-link
+        pattern: 'data-file="([^"]+\.zip)"'
+        base_url: http://mirror.example.com/files/
+    install:
+      destination: Demo
+"#,
+        "URL \"http://mirror.example.com/files/\" must use HTTPS",
+    );
+    assert_invalid_tool(
+        r#"
+tools:
+  demo:
+    release:
+      type: web
+      url: https://example.com/releases
+      version_pattern: 'version=(.+)'
+    artifacts:
+      - type: direct-url
+        url: http://example.com/demo.zip
+    install:
+      destination: Demo
+"#,
+        "URL \"http://example.com/demo.zip\" must use HTTPS",
+    );
+    assert_invalid_tool(
+        r#"
+tools:
+  demo:
+    release:
+      type: web
+      url: https://example.com/releases
+      version_pattern: 'version=(.+)'
+    artifacts:
+      - type: url-template
+        url: 'http://example.com/{version}/demo.zip'
+    install:
+      destination: Demo
+"#,
+        "URL \"http://example.com/v1.0.0/demo.zip\" must use HTTPS",
+    );
+}
+
+#[test]
+fn allows_plain_http_urls_when_insecure_transports_are_opted_in() {
+    let directory = tempdir().unwrap();
+    fs::write(
+        directory.path().join("manifest.yaml"),
+        r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+allow_insecure_transports: true
+"#,
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("tools.yaml"),
+        r#"
+tools:
+  demo:
+    release:
+      type: web
+      url: http://example.com/releases
+      version_pattern: 'version=(.+)'
+    artifacts:
+      - type: page-link
+        pattern: 'data-file="([^"]+\.zip)"'
+        base_url: http://mirror.example.com/files/
+      - type: direct-url
+        url: http://example.com/demo.zip
+      - type: url-template
+        url: 'http://example.com/{version}/demo.zip'
+    install:
+      destination: Demo
+  runtime:
+    release:
+      type: http
+      url: http://example.com/runtime.zip
+      version_headers: [etag]
+    artifacts:
+      - type: release-url
+    install:
+      destination: Runtime
+"#,
+    )
+    .unwrap();
+
+    let loaded = config::load(&directory.path().join("manifest.yaml")).unwrap();
+    assert_eq!(loaded.tools.len(), 2);
+}
+
+#[test]
+fn allows_https_urls_with_and_without_the_insecure_opt_in() {
+    for insecure in [false, true] {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("manifest.yaml"),
+            format!(
+                r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+allow_insecure_transports: {insecure}
+"#,
+            ),
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("tools.yaml"),
+            r#"
+tools:
+  demo:
+    release:
+      type: web
+      url: https://example.com/releases
+      version_pattern: 'version=(.+)'
+    artifacts:
+      - type: direct-url
+        url: https://example.com/demo.zip
+    install:
+      destination: Demo
+"#,
+        )
+        .unwrap();
+
+        let loaded = config::load(&directory.path().join("manifest.yaml")).unwrap();
+        assert_eq!(loaded.tools.len(), 1);
+    }
+}
+
+#[test]
+fn parses_the_insecure_transport_opt_in_and_defaults_to_false() {
+    let manifest: ManifestFile = yaml_serde::from_str(
+        r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: ~/Tools/Toolkit
+"#,
+    )
+    .unwrap();
+    assert!(!manifest.allow_insecure_transports);
+    let encoded = yaml_serde::to_string(&manifest).unwrap();
+    assert!(!encoded.contains("allow_insecure_transports"));
+
+    let opted_in: ManifestFile = yaml_serde::from_str(
+        r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: ~/Tools/Toolkit
+allow_insecure_transports: true
+"#,
+    )
+    .unwrap();
+    assert!(opted_in.allow_insecure_transports);
+    let encoded = yaml_serde::to_string(&opted_in).unwrap();
+    assert!(encoded.contains("allow_insecure_transports: true"));
+}
+
+#[test]
+fn rejects_non_boolean_allow_insecure_transports() {
+    assert_invalid_manifest(
+        r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+allow_insecure_transports: banana
+"#,
+        "invalid type",
     );
 }

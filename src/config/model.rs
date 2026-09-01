@@ -16,6 +16,9 @@ pub struct ManifestFile {
     pub schema_version: u32,
     pub include: Vec<String>,
     pub paths: PathConfig,
+    /// Permits plain-HTTP download URLs; HTTPS remains the only default.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_insecure_transports: bool,
     #[serde(default)]
     pub network: NetworkConfig,
     #[serde(default)]
@@ -109,6 +112,10 @@ fn default_true() -> bool {
 
 fn is_true(value: &bool) -> bool {
     *value
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

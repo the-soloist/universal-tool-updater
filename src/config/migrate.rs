@@ -84,6 +84,7 @@ pub fn migrate_directory(input: &Path, output: &Path) -> Result<()> {
         },
         network: NetworkConfig::default(),
         defaults: DefaultsConfig::default(),
+        allow_insecure_transports: false,
     };
     write_yaml_atomic(&output.join("manifest.yaml"), &manifest)?;
     println!(
