@@ -20,21 +20,35 @@ use super::http::{
     unsatisfied_total, validator_unchanged,
 };
 use super::partial::{
-    Metadata as PartialMetadata, Verification, checkpoint as checkpoint_partial,
-    clear as clear_partial, length as partial_length, load as load_partial_metadata,
-    paths as partial_paths, prepare_resume,
+    Metadata as PartialMetadata, SessionLock, Verification, checkpoint as checkpoint_partial,
+    clear as clear_partial, empty_prefix_sha256, length as partial_length,
+    load as load_partial_metadata, paths as partial_paths, prepare_resume,
 };
 use super::recovery::recover_previous_download;
 
 const HASH_CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024;
+const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const MAX_RESTARTS: usize = 3;
 
 pub struct Downloader {
     client: Client,
+    max_download_bytes: u64,
 }
 
 impl Downloader {
     pub fn new(client: Client) -> Self {
-        Self { client }
+        Self {
+            client,
+            max_download_bytes: DEFAULT_MAX_DOWNLOAD_BYTES,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_max_download_bytes(client: Client, max_download_bytes: u64) -> Self {
+        Self {
+            client,
+            max_download_bytes,
+        }
     }
 
     pub(crate) fn download(
@@ -62,6 +76,7 @@ impl Downloader {
                 partial_directory.display()
             )
         })?;
+        let _session_lock = SessionLock::acquire(partial_directory, &tool.id)?;
         let (temporary, metadata_path) = partial_paths(partial_directory, &artifact.url);
         let mut metadata = load_partial_metadata(&metadata_path, &temporary, &artifact.url)?;
         let downloaded = partial_length(metadata.as_ref(), &temporary)?;
@@ -76,6 +91,7 @@ impl Downloader {
         let mut hasher = resume.hasher;
 
         let mut transfer_attempt = 1;
+        let mut restarts = 0;
         loop {
             let requested_offset = downloaded;
             let validator = metadata.as_ref().and_then(PartialMetadata::validator);
@@ -117,6 +133,7 @@ impl Downloader {
                     );
                 }
 
+                count_restart(tool, &artifact.url, &mut restarts)?;
                 tracing::warn!(
                     tool = %tool.id,
                     url = %artifact.url,
@@ -170,6 +187,7 @@ impl Downloader {
                         }
                         .into());
                     }
+                    count_restart(tool, &artifact.url, &mut restarts)?;
                     // 错误的范围响应若直接追加会静默破坏文件，因此丢弃断点状态并从零开始请求。
                     tracing::warn!(
                         tool = %tool.id,
@@ -227,9 +245,27 @@ impl Downloader {
             } else {
                 response.content_length()
             };
+            if let Some(total) = total.filter(|total| *total > self.max_download_bytes) {
+                clear_partial(&metadata_path, &temporary)?;
+                return Err(UpdaterError::Download {
+                    tool: tool.id.clone(),
+                    message: format!(
+                        "download from {} reports {total} bytes, exceeding the download limit of {} bytes",
+                        artifact.url, self.max_download_bytes
+                    ),
+                }
+                .into());
+            }
+            let (prefix_sha256, prefix_len) = if append {
+                let partial = metadata
+                    .as_ref()
+                    .expect("a resumed transfer keeps its verified metadata");
+                (partial.prefix_sha256.clone(), partial.prefix_len)
+            } else {
+                (empty_prefix_sha256(), 0)
+            };
             let next_metadata = PartialMetadata {
                 schema_version: super::partial::SCHEMA_VERSION,
-                url: artifact.url.clone(),
                 filename: filename.clone(),
                 etag: response_header(&response, &ETAG)
                     .or_else(|| append.then(|| metadata.as_ref()?.etag.clone()).flatten()),
@@ -239,8 +275,8 @@ impl Downloader {
                         .flatten()
                 }),
                 total,
-                downloaded: None,
-                sha256: None,
+                prefix_sha256,
+                prefix_len,
                 complete: false,
                 verified: Verification::None,
             };
@@ -272,10 +308,18 @@ impl Downloader {
             progress.set_position(downloaded);
 
             let mut buffer = [0_u8; 64 * 1024];
+            let mut limit_exceeded = false;
             let transfer_error = loop {
                 match response.read(&mut buffer) {
                     Ok(0) => break None,
                     Ok(read) => {
+                        if downloaded
+                            .checked_add(read as u64)
+                            .is_none_or(|next| next > self.max_download_bytes)
+                        {
+                            limit_exceeded = true;
+                            break None;
+                        }
                         output.write_all(&buffer[..read]).with_context(|| {
                             format!("cannot write download file {}", temporary.display())
                         })?;
@@ -303,6 +347,17 @@ impl Downloader {
                 .sync_all()
                 .with_context(|| format!("cannot sync download file {}", temporary.display()))?;
             drop(output);
+            if limit_exceeded {
+                clear_partial(&metadata_path, &temporary)?;
+                return Err(UpdaterError::Download {
+                    tool: tool.id.clone(),
+                    message: format!(
+                        "download from {} exceeded the download limit of {} bytes",
+                        artifact.url, self.max_download_bytes
+                    ),
+                }
+                .into());
+            }
             checkpoint_partial(
                 &metadata_path,
                 &mut next_metadata,
@@ -370,4 +425,19 @@ impl Downloader {
             return completion.finalize(&temporary, &filename, downloaded, &digest);
         }
     }
+}
+
+fn count_restart(tool: &Tool, url: &str, restarts: &mut usize) -> Result<()> {
+    if *restarts >= MAX_RESTARTS {
+        return Err(UpdaterError::Download {
+            tool: tool.id.clone(),
+            message: format!(
+                "download from {url} restarted {} time(s) without completing; restart limit is {MAX_RESTARTS}",
+                *restarts
+            ),
+        }
+        .into());
+    }
+    *restarts += 1;
+    Ok(())
 }
