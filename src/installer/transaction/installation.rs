@@ -102,24 +102,48 @@ impl Backup {
     }
 
     fn restore_after_install(self, installed: bool) -> Result<()> {
-        if installed {
+        let removal = if installed {
             remove_path(&self.original).with_context(|| {
                 format!(
                     "cannot remove failed installation {}",
                     self.original.display()
                 )
-            })?;
-        }
-        if self.existed {
+            })
+        } else {
+            Ok(())
+        };
+        let restore = if self.existed {
             fs::rename(&self.backup, &self.original).with_context(|| {
                 format!(
                     "cannot restore backup {} to {}",
                     self.backup.display(),
                     self.original.display()
                 )
-            })?;
+            })
+        } else {
+            Ok(())
+        };
+        let restored = restore.is_ok();
+        let failures = [removal, restore]
+            .into_iter()
+            .filter_map(|result| result.err().map(|error| format!("{error:#}")))
+            .collect::<Vec<_>>();
+        if failures.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        if !self.existed {
+            anyhow::bail!("{}", failures.join("; "));
+        }
+        let backup_state = if restored {
+            "the previous version was restored from"
+        } else {
+            "the previous version is still in"
+        };
+        anyhow::bail!(
+            "{}; {backup_state} the backup {}",
+            failures.join("; "),
+            self.backup.display()
+        )
     }
 
     fn discard(self) -> Result<()> {
@@ -262,5 +286,33 @@ mod tests {
         assert_eq!(fs::read_to_string(version).unwrap(), "v1\n");
         assert!(!destination.join("new.txt").exists());
         assert!(!destination.join("next.txt").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rollback_reports_the_backup_path_when_removal_fails() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let directory = tempdir().unwrap();
+        let destination = directory.path().join("Demo");
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("old.txt"), "old").unwrap();
+        let backup = backup_path(&destination).unwrap();
+        let ready = directory.path().join("ready");
+        fs::create_dir(&ready).unwrap();
+        fs::write(ready.join("new.txt"), "new").unwrap();
+
+        let mut transaction = InstallationTransaction::begin(&destination, None).unwrap();
+        transaction.install(&ready, None).unwrap();
+        let _lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(destination.join("new.txt"))
+            .unwrap();
+
+        let error = transaction.rollback().unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains(&backup.display().to_string()));
+        assert!(backup.exists());
     }
 }

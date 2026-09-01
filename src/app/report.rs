@@ -1,8 +1,8 @@
 use std::fmt::Write as _;
 
 use crate::config::AppConfig;
-use crate::display::{pad_right, width as display_width};
-use crate::domain::{UpdateResult, UpdateStatus};
+use crate::display::{pad_right, sanitize_control_chars, width as display_width};
+use crate::domain::{ReleaseConfig, Tool, UpdateResult, UpdateStatus};
 use anyhow::Result;
 use console::{Style, Term};
 
@@ -17,15 +17,29 @@ pub(super) fn list_tools(config: &AppConfig, profiles: &[String]) -> Result<()> 
         .collect::<Vec<_>>();
     tools.sort_by_cached_key(|tool| list_sort_key(&tool.profile, &tool.name, &tool.id));
 
+    print!("{}", render_tool_list(&tools));
+    Ok(())
+}
+
+fn render_tool_list(tools: &[&Tool]) -> String {
+    let mut output = String::new();
     for tool in tools {
-        println!(
-            "{:<32} {:<12} {}",
+        let marker = if matches!(tool.release, ReleaseConfig::Manual {}) {
+            "  [manual]"
+        } else {
+            ""
+        };
+        writeln!(
+            &mut output,
+            "{:<32} {:<12} {}{}",
             tool.id,
             tool.profile,
-            tool.install.destination.display()
-        );
+            tool.install.destination.display(),
+            marker
+        )
+        .expect("writing to a String cannot fail");
     }
-    Ok(())
+    output
 }
 
 fn list_sort_key(profile: &str, name: &str, id: &str) -> (String, String, String) {
@@ -41,8 +55,8 @@ pub(super) fn print_summary(results: &[UpdateResult]) {
         tracing::debug!(
             tool = %result.tool_id,
             status = status_name(result.status),
-            version = result.version.as_deref().unwrap_or("-"),
-            message = %result.message,
+            version = %sanitize_control_chars(result.version.as_deref().unwrap_or("-")),
+            message = %sanitize_control_chars(&result.message),
             "update result"
         );
     }
@@ -69,9 +83,19 @@ fn status_name(status: UpdateStatus) -> &'static str {
 fn render_summary(results: &[UpdateResult], terminal_width: usize, color: bool) -> String {
     let terminal_width = terminal_width.max(40);
     let status_width = 9;
+    let results = results
+        .iter()
+        .map(|result| {
+            (
+                result,
+                sanitize_control_chars(result.version.as_deref().unwrap_or("-")),
+                sanitize_control_chars(&result.message),
+            )
+        })
+        .collect::<Vec<_>>();
     let desired_version_width = results
         .iter()
-        .map(|result| display_width(result.version.as_deref().unwrap_or("-")))
+        .map(|(_, version, _)| display_width(version))
         .max()
         .unwrap_or(0)
         .max(display_width("VERSION"))
@@ -82,7 +106,7 @@ fn render_summary(results: &[UpdateResult], terminal_width: usize, color: bool) 
         .max(display_width("TOOL"));
     let tool_width = results
         .iter()
-        .map(|result| display_width(&result.tool_id))
+        .map(|(result, _, _)| display_width(&result.tool_id))
         .max()
         .unwrap_or(0)
         .max(display_width("TOOL"))
@@ -127,14 +151,14 @@ fn render_summary(results: &[UpdateResult], terminal_width: usize, color: bool) 
         .expect("writing a String cannot fail");
     }
 
-    for result in results {
+    for (result, version, message) in results {
         let status = pad_display(status_label(result.status), status_width);
         let status = status_style(result.status, color).apply_to(status);
         let tool = pad_display(&result.tool_id, tool_width);
-        let version = pad_display(result.version.as_deref().unwrap_or("-"), version_width);
+        let version = pad_display(&version, version_width);
 
         if inline_details {
-            let lines = wrap_display(&result.message, detail_width);
+            let lines = wrap_display(&message, detail_width);
             writeln!(
                 &mut output,
                 "  {status}  {tool}  {version}  {}",
@@ -148,7 +172,7 @@ fn render_summary(results: &[UpdateResult], terminal_width: usize, color: bool) 
         } else {
             writeln!(&mut output, "  {status}  {tool}  {version}")
                 .expect("writing a String cannot fail");
-            for line in wrap_display(&result.message, terminal_width.saturating_sub(4)) {
+            for line in wrap_display(&message, terminal_width.saturating_sub(4)) {
                 writeln!(&mut output, "    {line}").expect("writing a String cannot fail");
             }
         }
@@ -232,11 +256,24 @@ fn split_index(value: &str, max_width: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use crate::domain::{UpdateResult, UpdateStatus};
+    use crate::domain::{ReleaseConfig, UpdateResult, UpdateStatus};
 
     use crate::display::width as display_width;
+    use crate::test_support::tool as test_tool;
 
-    use super::{list_sort_key, render_summary};
+    use super::{list_sort_key, render_summary, render_tool_list};
+
+    #[test]
+    fn tool_list_marks_manual_tools() {
+        let mut manual = test_tool("ida-pro", "/toolkit/Reverse/IDA");
+        manual.release = ReleaseConfig::Manual {};
+        let automatic = test_tool("jadx", "/toolkit/Reverse/JADX");
+
+        let rendered = render_tool_list(&[&manual, &automatic]);
+
+        assert!(rendered.lines().next().unwrap().contains("[manual]"));
+        assert!(!rendered.lines().nth(1).unwrap().contains("[manual]"));
+    }
 
     #[test]
     fn tools_are_sorted_by_profile_then_name_case_insensitively() {
@@ -275,6 +312,23 @@ mod tests {
         assert!(!rendered.contains("\x1b["));
         assert!(rendered.contains("✓ updated"));
         assert!(rendered.contains("✗ failed"));
+    }
+
+    #[test]
+    fn summary_strips_control_characters_from_remote_values() {
+        let results = [UpdateResult {
+            tool_id: "demo".to_owned(),
+            status: UpdateStatus::Updated,
+            version: Some("v\x1b[2J1.0".to_owned()),
+            message: "done\x1b]0;pwned\u{7f}".to_owned(),
+        }];
+
+        let rendered = render_summary(&results, 100, false);
+
+        assert!(!rendered.contains('\x1b'));
+        assert!(!rendered.contains('\u{7f}'));
+        assert!(rendered.contains("v[2J1.0"));
+        assert!(rendered.contains("done"));
     }
 
     #[test]

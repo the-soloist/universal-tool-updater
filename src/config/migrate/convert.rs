@@ -19,6 +19,7 @@ pub(super) fn convert_tool(
         "github" => ReleaseConfig::Github {
             repository: required_string(legacy, "url", name)?.to_owned(),
             ignore_versions: ignored,
+            allow_prereleases: false,
         },
         "web" | "format" => ReleaseConfig::Web {
             url: required_string(legacy, "url", name)?.to_owned(),

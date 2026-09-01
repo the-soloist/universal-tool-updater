@@ -79,6 +79,8 @@ pub enum ReleaseConfig {
         repository: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         ignore_versions: Vec<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        allow_prereleases: bool,
     },
     Web {
         url: String,
@@ -91,6 +93,8 @@ pub enum ReleaseConfig {
         #[serde(default = "default_version_headers")]
         version_headers: Vec<String>,
     },
+    /// A registered tool whose releases are maintained outside the updater.
+    Manual {},
 }
 
 fn default_version_headers() -> Vec<String> {
@@ -99,6 +103,10 @@ fn default_version_headers() -> Vec<String> {
         "last-modified".to_owned(),
         "content-length".to_owned(),
     ]
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

@@ -140,8 +140,8 @@ tools:
 | --- | --- | --- | --- |
 | `name` | 否 | 工具 ID | 展示名，也可用于压缩包名称模板。 |
 | `enabled` | 否 | `true` | 为 `false` 时更新结果为 skipped。 |
-| `release` | 是 | 无 | 版本来源，只能选择一种类型。 |
-| `artifacts` | 是 | 无 | 非空的下载产物列表。 |
+| `release` | 是 | 无 | 版本来源，只能选择一种类型；`manual` 表示工具由用户手动维护。 |
+| `artifacts` | 自动更新工具必填 | manual 工具为空 | 下载产物列表；自动更新工具不能为空，manual 工具不得配置。 |
 | `install` | 是 | 无 | 安装目标和处理策略。 |
 | `hooks` | 否 | 空 | 有序的原生 action 或 Python action。 |
 
@@ -177,10 +177,12 @@ release:
   repository: fatedier/frp
   ignore_versions:
     - v0.70.0
+  allow_prereleases: false
 ```
 
 - `repository` 必须为合法的 `owner/repository`，不能包含 URL 或多余路径。
 - `ignore_versions` 可省略，用于跳过指定 release tag；条目不能为空或重复。
+- `allow_prereleases` 可省略，默认 `false`；设为 `true` 才会选择 GitHub prerelease。使用 API 时按 release 标记过滤，使用 Atom 时按 semver tag 的预发布段过滤；无法解析为 semver 的 tag 保持可用。
 - 配置 GitHub token 后通过 API 解析 release；未配置 token 时使用公开 release 信息。
 
 ### 4.2 Web 页面
@@ -212,9 +214,24 @@ release:
 
 HTTP 类型会对 URL 发起 HEAD 请求，按顺序找到第一个存在的 `version_headers`，并对该 header 值计算稳定摘要作为版本号。列表不能为空，header 名称必须合法且不区分大小写地唯一。
 
+### 4.4 手动维护
+
+```yaml
+release:
+  type: manual
+```
+
+`manual` 用于登记需要人工下载、授权或安装的工具。此类型不解析版本，不发起下载，也不执行安装和 hooks；执行 `update` 时结果为 `skipped`，`list` 和 `list --tree` 会显示 `[manual]` 标记。
+
+- `artifacts` 应省略，也兼容显式空列表 `artifacts: []`；配置任何下载产物都会报错。
+- `install.destination` 仍然必填，并继续参与安装目录冲突检查。
+- `manual` 没有其他字段，多余字段会被拒绝。
+
 ## 5. artifacts：下载产物
 
 同一工具可以配置多个 artifact，按配置顺序解析和安装。完全相同的 artifact 配置不能重复。
+
+本节只适用于自动更新工具；`release.type: manual` 不配置 artifacts。
 
 ### 5.1 类型兼容表
 

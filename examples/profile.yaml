@@ -16,6 +16,7 @@ tools:
       repository: sharkdp/bat
       ignore_versions:
         - v0.24.0
+      # allow_prereleases: true
     artifacts:
       - type: github-asset
         pattern: '^bat-v[^/]+-x86_64-pc-windows-msvc\.zip$'
@@ -105,3 +106,12 @@ tools:
       input: copy
       existing: replace
       save: directory
+
+  # 手动维护：仅登记工具及其目录，不解析版本，也不下载或安装。
+  example-manual-tool:
+    name: ExampleManualTool
+    enabled: false
+    release:
+      type: manual
+    install:
+      destination: Examples/Manual/Tool

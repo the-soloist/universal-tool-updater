@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
@@ -18,7 +19,7 @@ use crate::workspace::{RunWorkspace, ToolWorkspace};
 use super::http::is_retryable_status;
 use super::partial::{
     Metadata as PartialMetadata, SCHEMA_VERSION as PARTIAL_SCHEMA_VERSION, Verification,
-    digest as sha256_digest, paths as partial_paths, save as save_partial_metadata,
+    hash_prefix, paths as partial_paths, save as save_partial_metadata,
 };
 use super::{DownloadCompletion, Downloader};
 
@@ -79,13 +80,12 @@ fn restarts_when_a_schema_v2_cache_fails_sha256_validation() {
         &metadata,
         &PartialMetadata {
             schema_version: PARTIAL_SCHEMA_VERSION,
-            url: url.clone(),
             filename: "artifact.bin".to_owned(),
             etag: Some("\"stale-v1\"".to_owned()),
             last_modified: None,
             total: Some(body.len() as u64),
-            downloaded: Some(6),
-            sha256: Some("0".repeat(64)),
+            prefix_sha256: "0".repeat(64),
+            prefix_len: 6,
             complete: false,
             verified: Verification::None,
         },
@@ -240,13 +240,12 @@ fn recovers_a_completed_artifact_from_an_interrupted_run() {
         &short_metadata,
         &PartialMetadata {
             schema_version: 1,
-            url: url.clone(),
             filename: "artifact-1.0.0.bin".to_owned(),
             etag: Some("\"partial-v1\"".to_owned()),
             last_modified: None,
             total: Some(body.len() as u64),
-            downloaded: None,
-            sha256: None,
+            prefix_sha256: "0".repeat(64),
+            prefix_len: 0,
             complete: false,
             verified: Verification::None,
         },
@@ -376,6 +375,100 @@ fn rejects_duplicate_artifact_filenames_instead_of_overwriting() {
     assert_eq!(fs::read_to_string(partial).unwrap(), "second");
 }
 
+#[test]
+fn rejects_chunked_responses_that_exceed_the_download_ceiling() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/artifact.bin", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let size = stream.read(&mut request).unwrap();
+        let _request = String::from_utf8_lossy(&request[..size]);
+        let _ = stream.write_all(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nETag: \"chunked-limit\"\r\nConnection: close\r\n\r\n",
+        );
+        for _ in 0..16 {
+            let _ = stream.write_all(b"20\r\n");
+            let _ = stream.write_all(&[0_u8; 32]);
+            let _ = stream.write_all(b"\r\n");
+        }
+        let _ = stream.write_all(b"0\r\n\r\n");
+    });
+
+    let fixture = DownloadFixture::new();
+    let client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let progress = ProgressManager::new(false, 1);
+    let task_progress = progress.task("test", "Limit");
+    let error = Downloader::with_max_download_bytes(client, 64)
+        .download(
+            &fixture.tool,
+            "1.0.0",
+            &ResolvedArtifact {
+                url: url.clone(),
+                filename: Some("artifact.bin".to_owned()),
+            },
+            &fixture.workspace,
+            (0, 1),
+            &task_progress,
+        )
+        .unwrap_err();
+    server.join().unwrap();
+
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("download limit of 64 bytes"),
+        "expected the byte-ceiling failure, got {message}"
+    );
+    fixture.assert_partials_empty();
+}
+
+#[test]
+fn fails_within_a_bounded_number_of_restarts_against_an_oscillating_server() {
+    let body = [0_u8; 101];
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/artifact.bin", listener.local_addr().unwrap());
+    let _server = thread::spawn(move || {
+        for _ in 0..16 {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+            let mut request = [0_u8; 4096];
+            let Ok(size) = stream.read(&mut request) else {
+                break;
+            };
+            let _request = String::from_utf8_lossy(&request[..size]);
+            if write!(
+                stream,
+                "HTTP/1.1 206 Partial Content\r\nContent-Length: 101\r\nContent-Range: bytes 0-100/1000\r\nETag: \"oscillate-v1\"\r\nConnection: close\r\n\r\n"
+            )
+            .is_err()
+            {
+                break;
+            }
+            let _ = stream.write_all(&body);
+        }
+    });
+
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let fixture = DownloadFixture::new();
+        let result = fixture.download_result(&url).map(|_| ());
+        let _ = sender.send(result);
+    });
+    let error = receiver
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the oscillating download must terminate instead of hanging")
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("restarted"),
+        "expected a restart-limit failure, got {error:#}"
+    );
+}
+
 fn resume_tool() -> Tool {
     let mut tool = test_tool("resume-test", "resume-test");
     tool.name = "Resume Test".to_owned();
@@ -415,14 +508,13 @@ impl DownloadFixture {
         save_partial_metadata(
             &metadata,
             &PartialMetadata {
-                schema_version: 1,
-                url: url.to_owned(),
+                schema_version: PARTIAL_SCHEMA_VERSION,
                 filename: "artifact.bin".to_owned(),
                 etag: Some(etag.to_owned()),
                 last_modified: None,
                 total,
-                downloaded: None,
-                sha256: None,
+                prefix_sha256: hash_prefix(&partial, contents.len() as u64).unwrap(),
+                prefix_len: contents.len() as u64,
                 complete: false,
                 verified: Verification::None,
             },
@@ -431,25 +523,27 @@ impl DownloadFixture {
     }
 
     fn download(&self, url: &str) -> DownloadedArtifact {
+        self.download_result(url).unwrap()
+    }
+
+    fn download_result(&self, url: &str) -> Result<DownloadedArtifact, anyhow::Error> {
         let client = Client::builder()
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
         let progress = ProgressManager::new(false, 1);
         let task_progress = progress.task("test", "Resume");
-        Downloader::new(client)
-            .download(
-                &self.tool,
-                "1.0.0",
-                &ResolvedArtifact {
-                    url: url.to_owned(),
-                    filename: Some("artifact.bin".to_owned()),
-                },
-                &self.workspace,
-                (0, 1),
-                &task_progress,
-            )
-            .unwrap()
+        Downloader::new(client).download(
+            &self.tool,
+            "1.0.0",
+            &ResolvedArtifact {
+                url: url.to_owned(),
+                filename: Some("artifact.bin".to_owned()),
+            },
+            &self.workspace,
+            (0, 1),
+            &task_progress,
+        )
     }
 
     fn assert_partials_empty(&self) {
@@ -465,12 +559,16 @@ impl DownloadFixture {
         let encoded = fs::read_to_string(metadata).unwrap();
         let metadata: PartialMetadata = yaml_serde::from_str(&encoded).unwrap();
         assert_eq!(metadata.schema_version, PARTIAL_SCHEMA_VERSION);
-        assert_eq!(metadata.downloaded, Some(contents.len() as u64));
+        assert_eq!(metadata.prefix_len, contents.len() as u64);
         assert_eq!(metadata.total, Some(contents.len() as u64));
         let mut hasher = Sha256::new();
         hasher.update(contents);
-        let expected_sha256 = sha256_digest(&hasher);
-        assert_eq!(metadata.sha256.as_deref(), Some(expected_sha256.as_str()));
+        let expected_sha256 = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(metadata.prefix_sha256, expected_sha256);
         assert!(metadata.complete);
         assert_eq!(metadata.verified, Verification::Transport);
     }

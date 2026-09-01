@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use universal_tool_updater::config;
+use universal_tool_updater::domain::ReleaseConfig;
 
 #[test]
 fn local_profile_manifest_is_valid_when_present() {
@@ -25,7 +26,11 @@ fn local_profile_manifest_is_valid_when_present() {
     assert_eq!(config.paths.staging, config.paths.downloads.join("staging"));
     assert!(config.paths.state.starts_with(&config.paths.toolkit_root));
     for tool in config.tools.values() {
-        assert!(!tool.artifacts.is_empty(), "{} has no artifacts", tool.id);
+        if matches!(tool.release, ReleaseConfig::Manual {}) {
+            assert!(tool.artifacts.is_empty(), "{} has artifacts", tool.id);
+        } else {
+            assert!(!tool.artifacts.is_empty(), "{} has no artifacts", tool.id);
+        }
         assert!(
             tool.install
                 .destination
@@ -42,7 +47,7 @@ fn example_manifest_and_profile_remain_valid_and_disabled() {
     assert!(manifest.is_file(), "example manifest is missing");
 
     let loaded = config::load(manifest).unwrap();
-    assert_eq!(loaded.tools.len(), 4);
+    assert_eq!(loaded.tools.len(), 5);
     assert_eq!(loaded.network.jobs, 4);
     assert!(loaded.tools.values().all(|tool| !tool.enabled));
 }

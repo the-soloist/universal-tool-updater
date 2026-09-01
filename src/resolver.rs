@@ -40,12 +40,14 @@ impl Resolver {
             ReleaseConfig::Github {
                 repository,
                 ignore_versions,
+                allow_prereleases,
             } => github::resolve(
                 &self.client,
                 self.github_token.as_deref(),
                 tool,
                 repository,
                 ignore_versions,
+                *allow_prereleases,
             ),
             ReleaseConfig::Web {
                 url,
@@ -56,6 +58,10 @@ impl Resolver {
                 url,
                 version_headers,
             } => http::resolve(&self.client, tool, url, version_headers),
+            ReleaseConfig::Manual {} => Err(anyhow::anyhow!(
+                "tool {} is maintained manually and has no release to resolve",
+                tool.id
+            )),
         }
     }
 }

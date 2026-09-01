@@ -96,6 +96,7 @@ pub struct ToolConfig {
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
     pub release: ReleaseConfig,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<ArtifactConfig>,
     pub install: InstallConfig,
     #[serde(default, skip_serializing_if = "HookConfig::is_empty")]

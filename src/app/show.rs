@@ -3,7 +3,7 @@ use std::path::{Component, Path};
 
 use crate::config::AppConfig;
 use crate::display::truncate;
-use crate::domain::{InputMode, Tool};
+use crate::domain::{InputMode, ReleaseConfig, Tool};
 use anyhow::Result;
 use console::Term;
 
@@ -65,6 +65,7 @@ struct DistributionEntry {
     profile: String,
     directories: Vec<String>,
     tool: String,
+    manual: bool,
 }
 
 impl DistributionEntry {
@@ -84,6 +85,7 @@ impl DistributionEntry {
             profile: tool.profile.clone(),
             directories,
             tool: tool.name.clone(),
+            manual: matches!(tool.release, ReleaseConfig::Manual {}),
         }
     }
 
@@ -106,7 +108,11 @@ impl DistributionEntry {
                     .join("/"),
             );
         }
-        cells.push(self.tool.clone());
+        cells.push(if self.manual {
+            format!("{} [manual]", self.tool)
+        } else {
+            self.tool.clone()
+        });
         cells
     }
 }

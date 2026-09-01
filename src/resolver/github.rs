@@ -19,12 +19,15 @@ pub(super) fn resolve(
     tool: &Tool,
     repository: &str,
     ignored: &[String],
+    allow_prereleases: bool,
 ) -> Result<ResolvedRelease> {
     let (version, api_assets, mut html_assets) = if let Some(token) = token {
-        let (version, assets) = release_from_api(client, token, tool, repository, ignored)?;
+        let (version, assets) =
+            release_from_api(client, token, tool, repository, ignored, allow_prereleases)?;
         (version, assets, None)
     } else {
-        let (version, assets) = version_from_atom(client, tool, repository, ignored)?;
+        let (version, assets) =
+            version_from_atom(client, tool, repository, ignored, allow_prereleases)?;
         (version, None, assets)
     };
 
@@ -160,6 +163,7 @@ fn release_from_api(
     tool: &Tool,
     repository: &str,
     ignored: &[String],
+    allow_prereleases: bool,
 ) -> Result<(String, Option<Vec<GithubAsset>>)> {
     let url = format!("https://api.github.com/repos/{repository}/releases?per_page=30");
     let releases: Vec<GithubRelease> = client
@@ -178,21 +182,31 @@ fn release_from_api(
             message: format!("invalid GitHub API response: {error}"),
         })?;
     let required = required_asset_patterns(tool)?;
-    let release = releases
-        .into_iter()
-        .find(|release| {
-            !release.draft
-                && !ignored.contains(&release.tag_name)
-                && release_assets_match(
-                    &required,
-                    release.assets.iter().map(|asset| asset.name.as_str()),
-                )
-        })
-        .ok_or_else(|| UpdaterError::Resolution {
-            tool: tool.id.clone(),
-            message: "no eligible GitHub release matched the configured assets".to_owned(),
+    let release =
+        eligible_release(releases, &required, ignored, allow_prereleases).ok_or_else(|| {
+            UpdaterError::Resolution {
+                tool: tool.id.clone(),
+                message: "no eligible GitHub release matched the configured assets".to_owned(),
+            }
         })?;
     Ok((release.tag_name, Some(release.assets)))
+}
+
+fn eligible_release(
+    releases: Vec<GithubRelease>,
+    required: &[Regex],
+    ignored: &[String],
+    allow_prereleases: bool,
+) -> Option<GithubRelease> {
+    releases.into_iter().find(|release| {
+        !release.draft
+            && (allow_prereleases || !release.prerelease)
+            && !ignored.contains(&release.tag_name)
+            && release_assets_match(
+                required,
+                release.assets.iter().map(|asset| asset.name.as_str()),
+            )
+    })
 }
 
 fn version_from_atom(
@@ -200,6 +214,7 @@ fn version_from_atom(
     tool: &Tool,
     repository: &str,
     ignored: &[String],
+    allow_prereleases: bool,
 ) -> Result<(String, Option<HtmlAssets>)> {
     let url = format!("https://github.com/{repository}/releases.atom");
     let body = get_text(client, tool, &url)?;
@@ -207,7 +222,7 @@ fn version_from_atom(
     let versions = regex
         .captures_iter(&body)
         .filter_map(|capture| capture.get(1).map(|value| value.as_str().to_owned()))
-        .filter(|version| !ignored.contains(version));
+        .filter(|version| eligible_atom_version(version, ignored, allow_prereleases));
     let required = required_asset_patterns(tool)?;
     for version in versions {
         if required.is_empty() {
@@ -223,6 +238,16 @@ fn version_from_atom(
         message: "no eligible GitHub release matched the configured assets".to_owned(),
     }
     .into())
+}
+
+fn eligible_atom_version(version: &str, ignored: &[String], allow_prereleases: bool) -> bool {
+    if ignored.iter().any(|ignored| ignored == version) {
+        return false;
+    }
+    allow_prereleases
+        || semver::Version::parse(version.strip_prefix('v').unwrap_or(version))
+            .map(|version| version.pre.is_empty())
+            .unwrap_or(true)
 }
 
 fn required_asset_patterns(tool: &Tool) -> Result<Vec<Regex>> {
@@ -278,6 +303,7 @@ fn assets_from_html(
 struct GithubRelease {
     tag_name: String,
     draft: bool,
+    prerelease: bool,
     assets: Vec<GithubAsset>,
 }
 
@@ -291,7 +317,62 @@ struct GithubAsset {
 mod tests {
     use regex::Regex;
 
-    use super::{matching_artifacts, release_assets_match};
+    use super::{
+        GithubAsset, GithubRelease, eligible_atom_version, eligible_release, matching_artifacts,
+        release_assets_match,
+    };
+
+    fn release(tag: &str, draft: bool, prerelease: bool, assets: &[&str]) -> GithubRelease {
+        GithubRelease {
+            tag_name: tag.to_owned(),
+            draft,
+            prerelease,
+            assets: assets
+                .iter()
+                .map(|name| GithubAsset {
+                    name: (*name).to_owned(),
+                    browser_download_url: format!(
+                        "https://github.com/owner/repo/releases/download/{tag}/{name}"
+                    ),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn skips_api_prereleases_unless_the_tool_opts_in() {
+        let required = [Regex::new(r"^tool\.zip$").unwrap()];
+        let ignored = Vec::new();
+        let releases = || {
+            vec![
+                release("v2.0.0-rc1", false, true, &["tool.zip"]),
+                release("v1.9.0", false, false, &["tool.zip"]),
+            ]
+        };
+
+        assert_eq!(
+            eligible_release(releases(), &required, &ignored, false)
+                .unwrap()
+                .tag_name,
+            "v1.9.0"
+        );
+        assert_eq!(
+            eligible_release(releases(), &required, &ignored, true)
+                .unwrap()
+                .tag_name,
+            "v2.0.0-rc1"
+        );
+    }
+
+    #[test]
+    fn skips_atom_prerelease_tags_unless_the_tool_opts_in() {
+        let ignored = Vec::new();
+
+        assert!(!eligible_atom_version("v2.0.0-rc.1", &ignored, false));
+        assert!(eligible_atom_version("v2.0.0-rc.1", &ignored, true));
+        assert!(eligible_atom_version("v2.0.0", &ignored, false));
+        assert!(eligible_atom_version("nightly-20260901", &ignored, false));
+    }
 
     #[test]
     fn collects_every_asset_matching_a_plural_pattern() {

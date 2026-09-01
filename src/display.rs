@@ -33,9 +33,21 @@ pub(crate) fn pad_right(value: &str, target_width: usize) -> String {
     output
 }
 
+/// Strips C0/C1 control characters and DEL from untrusted remote strings
+/// (version numbers, release messages) so embedded escape sequences cannot
+/// repaint or corrupt the terminal. Tab is preserved.
+pub(crate) fn sanitize_control_chars(value: &str) -> String {
+    value
+        .chars()
+        .filter(|&character| {
+            character == '\t' || !matches!(character, '\0'..='\u{1f}' | '\u{7f}'..='\u{9f}')
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{pad_right, truncate, width};
+    use super::{pad_right, sanitize_control_chars, truncate, width};
 
     #[test]
     fn handles_ascii_and_wide_characters_consistently() {
@@ -44,5 +56,13 @@ mod tests {
         assert_eq!(truncate("ripgrep", 12), "ripgrep");
         assert_eq!(truncate("wide", 0), "");
         assert_eq!(width(&pad_right("工具", 8)), 8);
+    }
+
+    #[test]
+    fn strips_terminal_control_characters_but_keeps_tabs() {
+        // ESC removal defuses the sequence; the printable [2J residue is inert.
+        assert_eq!(sanitize_control_chars("v\x1b[2J1.0"), "v[2J1.0");
+        assert_eq!(sanitize_control_chars("a\tb\u{7f}c\u{85}\u{9b}"), "a\tbc");
+        assert_eq!(sanitize_control_chars("plain v1.2.3"), "plain v1.2.3");
     }
 }
