@@ -993,6 +993,71 @@ tools:
     );
 }
 
+#[test]
+fn parses_the_install_symlink_opt_in_and_defaults_to_false() {
+    let directory = tempdir().unwrap();
+    fs::write(
+        directory.path().join("manifest.yaml"),
+        r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+"#,
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("tools.yaml"),
+        r#"
+tools:
+  plain:
+    release:
+      type: github
+      repository: owner/plain
+    artifacts:
+      - type: github-asset
+        pattern: plain.tar.gz
+    install:
+      destination: Plain
+  linked:
+    release:
+      type: github
+      repository: owner/linked
+    artifacts:
+      - type: github-asset
+        pattern: linked.tar.gz
+    install:
+      destination: Linked
+      allow_symlinks_in_archive: true
+"#,
+    )
+    .unwrap();
+
+    let loaded = config::load(&directory.path().join("manifest.yaml")).unwrap();
+    assert!(!loaded.tools["plain"].install.allow_symlinks_in_archive);
+    assert!(loaded.tools["linked"].install.allow_symlinks_in_archive);
+}
+
+#[test]
+fn rejects_non_boolean_allow_symlinks_in_archive() {
+    assert_invalid_tool(
+        r#"
+tools:
+  linked:
+    release:
+      type: github
+      repository: owner/linked
+    artifacts:
+      - type: github-asset
+        pattern: linked.tar.gz
+    install:
+      destination: Linked
+      allow_symlinks_in_archive: banana
+"#,
+        "invalid type",
+    );
+}
+
 fn assert_invalid_tool(tool_file: &str, expected: &str) {
     assert_invalid_tool_with_manifest(
         r#"

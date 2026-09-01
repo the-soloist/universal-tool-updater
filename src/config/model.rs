@@ -111,6 +111,10 @@ fn is_true(value: &bool) -> bool {
     *value
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct InstallConfig {
@@ -129,6 +133,8 @@ pub struct InstallConfig {
     pub archive_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archive_password: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_symlinks_in_archive: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub executable: Vec<PathBuf>,
     #[serde(skip_serializing_if = "Vec::is_empty")]

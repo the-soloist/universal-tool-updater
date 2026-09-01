@@ -1,6 +1,7 @@
+use std::fmt::Display;
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::Result;
 use bzip2::read::BzDecoder;
@@ -14,7 +15,16 @@ use zip::{CompressionMethod, read::ZipFile};
 
 use crate::error::UpdaterError;
 
+use super::ExtractionContext;
+
 const IO_BUFFER_BYTES: usize = 256 * 1024;
+
+fn archive_error(path: &Path, message: impl Display) -> UpdaterError {
+    UpdaterError::Archive {
+        path: path.to_path_buf(),
+        message: message.to_string(),
+    }
+}
 
 pub(super) fn zip(archive_path: &Path, destination: &Path, password: Option<&str>) -> Result<()> {
     let file = File::open(archive_path)?;
@@ -253,7 +263,12 @@ pub(super) fn seven_zip(archive: &Path, destination: &Path, password: Option<&st
     })
 }
 
-pub(super) fn rar(archive: &Path, destination: &Path, password: Option<&str>) -> Result<()> {
+pub(super) fn rar(
+    archive: &Path,
+    destination: &Path,
+    password: Option<&str>,
+    context: &ExtractionContext<'_>,
+) -> Result<()> {
     let file = File::open(archive)?;
     let mut reader = if let Some(password) = password {
         RarArchive::open_with_password(file, password)
@@ -269,6 +284,9 @@ pub(super) fn rar(archive: &Path, destination: &Path, password: Option<&str>) ->
         password: password.map(ToOwned::to_owned),
         restore_owners: false,
     };
+    let destination_root = destination
+        .canonicalize()
+        .unwrap_or_else(|_| destination.to_path_buf());
 
     for member in reader.indexed_member_infos() {
         if !member.extractable {
@@ -286,6 +304,18 @@ pub(super) fn rar(archive: &Path, destination: &Path, password: Option<&str>) ->
                 path: archive.to_path_buf(),
                 message: format!("unsafe RAR entry {:?}", member.info.raw_name),
             })?;
+        // unrar-rs 已把 UnixSymlink/WindowsSymlink/WindowsJunction 归一为 is_symlink。
+        if member.info.is_symlink || member.info.is_hardlink {
+            ensure_rar_link_is_allowed(
+                archive,
+                destination,
+                &destination_root,
+                relative,
+                member.info.is_hardlink,
+                member.info.link_target.as_deref(),
+                context,
+            )?;
+        }
         let output = destination.join(relative);
         if let Some(parent) = output.parent() {
             fs::create_dir_all(parent)?;
@@ -300,27 +330,84 @@ pub(super) fn rar(archive: &Path, destination: &Path, password: Option<&str>) ->
     Ok(())
 }
 
-pub(super) fn tar_gzip(archive: &Path, destination: &Path) -> Result<()> {
+/// RAR 链接成员默认拒绝，与 tar 策略一致。opt-in 路径复用 tar 侧的
+/// 界内校验；RAR3 的 symlink 目标位于成员载荷、头部无目标，保持拒绝。
+fn ensure_rar_link_is_allowed(
+    archive_path: &Path,
+    destination: &Path,
+    destination_root: &Path,
+    member: &Path,
+    is_hardlink: bool,
+    target: Option<&str>,
+    context: &ExtractionContext<'_>,
+) -> Result<()> {
+    let kind = if is_hardlink {
+        "hard link"
+    } else {
+        "symbolic link"
+    };
+    let tool_prefix = link_tool_prefix(context);
+    if !context.allow_symlinks {
+        return Err(archive_error(
+            archive_path,
+            format!(
+                "{tool_prefix}RAR member {member:?} is a {kind}; set install.allow_symlinks_in_archive to allow links"
+            ),
+        )
+        .into());
+    }
+    let target = target.ok_or_else(|| {
+        archive_error(
+            archive_path,
+            format!("{tool_prefix}RAR member {member:?} is a {kind} without a target"),
+        )
+    })?;
+    ensure_bounded_link_target(
+        archive_path,
+        destination,
+        destination_root,
+        kind,
+        member,
+        Path::new(target),
+    )
+}
+
+pub(super) fn tar_gzip(
+    archive: &Path,
+    destination: &Path,
+    context: &ExtractionContext<'_>,
+) -> Result<()> {
     extract_tar(
         GzDecoder::new(buffered_archive(archive)?),
         archive,
         destination,
+        context,
     )
 }
 
-pub(super) fn tar_bzip2(archive: &Path, destination: &Path) -> Result<()> {
+pub(super) fn tar_bzip2(
+    archive: &Path,
+    destination: &Path,
+    context: &ExtractionContext<'_>,
+) -> Result<()> {
     extract_tar(
         BzDecoder::new(buffered_archive(archive)?),
         archive,
         destination,
+        context,
     )
 }
 
-pub(super) fn tar_xz(archive: &Path, destination: &Path) -> Result<()> {
+pub(super) fn tar_xz(
+    archive: &Path,
+    destination: &Path,
+    context: &ExtractionContext<'_>,
+) -> Result<()> {
     extract_tar(
         XzDecoder::new(buffered_archive(archive)?),
         archive,
         destination,
+        context,
     )
 }
 
@@ -354,17 +441,35 @@ fn copy_buffered<R: Read, W: Write>(input: &mut R, output: W) -> io::Result<u64>
     Ok(copied)
 }
 
-fn extract_tar<R: io::Read>(reader: R, archive_path: &Path, destination: &Path) -> Result<()> {
+fn extract_tar<R: io::Read>(
+    reader: R,
+    archive_path: &Path,
+    destination: &Path,
+    context: &ExtractionContext<'_>,
+) -> Result<()> {
     let mut archive = TarArchive::new(reader);
     let entries = archive.entries().map_err(|error| UpdaterError::Archive {
         path: archive_path.to_path_buf(),
         message: error.to_string(),
     })?;
+    let destination_root = destination
+        .canonicalize()
+        .unwrap_or_else(|_| destination.to_path_buf());
     for entry in entries {
         let mut entry = entry.map_err(|error| UpdaterError::Archive {
             path: archive_path.to_path_buf(),
             message: error.to_string(),
         })?;
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_symlink() || entry_type.is_hard_link() {
+            ensure_link_is_allowed(
+                archive_path,
+                destination,
+                &destination_root,
+                &mut entry,
+                context,
+            )?;
+        }
         let unpacked = entry
             .unpack_in(destination)
             .map_err(|error| UpdaterError::Archive {
@@ -380,6 +485,120 @@ fn extract_tar<R: io::Read>(reader: R, archive_path: &Path, destination: &Path) 
         }
     }
     Ok(())
+}
+
+/// 符号链接与硬链接默认拒绝，与自更新链路的安全基线一致。
+/// opt-in 路径仍要求链接目标为相对路径且解析后位于解压目录内。
+fn ensure_link_is_allowed<R: io::Read>(
+    archive_path: &Path,
+    destination: &Path,
+    destination_root: &Path,
+    entry: &mut tar::Entry<'_, R>,
+    context: &ExtractionContext<'_>,
+) -> Result<()> {
+    let path = entry
+        .path()
+        .map_err(|error| archive_error(archive_path, error))?;
+    let kind = if entry.header().entry_type().is_symlink() {
+        "symbolic link"
+    } else {
+        "hard link"
+    };
+    let tool_prefix = link_tool_prefix(context);
+    if !context.allow_symlinks {
+        return Err(archive_error(
+            archive_path,
+            format!(
+                "{tool_prefix}archive entry {path:?} is a {kind}; set install.allow_symlinks_in_archive to allow links"
+            ),
+        )
+        .into());
+    }
+    let target = entry
+        .link_name()
+        .map_err(|error| archive_error(archive_path, error))?
+        .ok_or_else(|| {
+            archive_error(
+                archive_path,
+                format!("{tool_prefix}archive entry {path:?} is a {kind} without a target"),
+            )
+        })?;
+    ensure_bounded_link_target(
+        archive_path,
+        destination,
+        destination_root,
+        kind,
+        path.as_ref(),
+        target.as_ref(),
+    )
+}
+
+/// 链接目标必须是相对路径，且与条目位置拼接后仍位于解压目录内。
+fn ensure_bounded_link_target(
+    archive_path: &Path,
+    destination: &Path,
+    destination_root: &Path,
+    kind: &str,
+    member: &Path,
+    target: &Path,
+) -> Result<()> {
+    if target.is_absolute() {
+        return Err(archive_error(
+            archive_path,
+            format!("{kind} {member:?} target {target:?} must be relative"),
+        )
+        .into());
+    }
+    let link_directory = destination
+        .join(member)
+        .parent()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            archive_error(
+                archive_path,
+                format!("{kind} {member:?} has no parent directory"),
+            )
+        })?;
+    let resolved = link_directory.join(target);
+    let contained = match resolved.canonicalize() {
+        Ok(real) => real.starts_with(destination_root),
+        Err(_) => {
+            // 目标可能尚未落盘：按词法归一化后对照两个形式的解压根目录。
+            let lexical = lexical_root(&resolved);
+            lexical.starts_with(destination) || lexical.starts_with(destination_root)
+        }
+    };
+    if !contained {
+        return Err(archive_error(
+            archive_path,
+            format!("{kind} {member:?} target {target:?} escapes the extraction directory"),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// 词法归一化 `.` 与 `..` 分量，使尚未物化的链接目标也能对照解压根目录检查。
+fn lexical_root(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+/// 链接拒绝错误中的工具归属前缀；非工具作用域解压时为空。
+fn link_tool_prefix(context: &ExtractionContext<'_>) -> String {
+    context
+        .tool_id
+        .map(|id| format!("tool {id}: "))
+        .unwrap_or_default()
 }
 
 fn extract_single<R: io::Read>(mut reader: R, archive: &Path, destination: &Path) -> Result<()> {

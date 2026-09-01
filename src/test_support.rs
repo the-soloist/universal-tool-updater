@@ -25,6 +25,7 @@ pub(crate) fn tool(id: &str, destination: impl Into<PathBuf>) -> Tool {
             create_destination: true,
             archive_name: "{name}-{version}.7z".to_owned(),
             archive_password: None,
+            allow_symlinks_in_archive: false,
             executable: Vec::new(),
             symlinks: Vec::new(),
         },
