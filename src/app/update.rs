@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::archive::ArchiveService;
 use crate::config::AppConfig;
-use crate::domain::{Tool, UpdateResult, UpdateStatus};
+use crate::domain::{ReleaseConfig, Tool, UpdateResult, UpdateStatus};
 use crate::downloader::Downloader;
 use crate::hooks::{HookContext, HookRunner, HookStage};
 use crate::installer::{
@@ -233,6 +233,14 @@ impl UpdateSession<'_> {
                 UpdateStatus::Skipped,
                 None,
                 "disabled",
+            )));
+        }
+        if matches!(tool.release, ReleaseConfig::Manual {}) {
+            return Ok(ToolUpdate::new(result(
+                tool,
+                UpdateStatus::Skipped,
+                None,
+                "maintained manually; not auto-updated",
             )));
         }
         if !tool.install.destination.exists()

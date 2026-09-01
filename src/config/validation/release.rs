@@ -89,6 +89,7 @@ pub(super) fn validate(path: &Path, id: &str, release: &ReleaseConfig) -> Result
                 }
             }
         }
+        ReleaseConfig::Manual {} => {}
     }
     Ok(())
 }
@@ -99,6 +100,18 @@ pub(super) fn validate_artifacts(
     release: &ReleaseConfig,
     artifacts: &[ArtifactConfig],
 ) -> Result<()> {
+    if matches!(release, ReleaseConfig::Manual {}) {
+        if !artifacts.is_empty() {
+            return Err(UpdaterError::config(
+                path,
+                format!(
+                    "tool {id}: manual tools are maintained manually and must not configure artifacts"
+                ),
+            )
+            .into());
+        }
+        return Ok(());
+    }
     if artifacts.is_empty() {
         return Err(
             UpdaterError::config(path, format!("tool {id}: artifacts must not be empty")).into(),

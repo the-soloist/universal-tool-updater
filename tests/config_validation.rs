@@ -923,6 +923,76 @@ tools:
     );
 }
 
+#[test]
+fn accepts_manual_release_without_artifacts() {
+    let directory = tempdir().unwrap();
+    fs::write(
+        directory.path().join("manifest.yaml"),
+        r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+"#,
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("tools.yaml"),
+        r#"
+tools:
+  ida-pro:
+    name: IDA Pro
+    release:
+      type: manual
+    install:
+      destination: Reverse/Decompiler/IDA Pro
+"#,
+    )
+    .unwrap();
+
+    let loaded = config::load(&directory.path().join("manifest.yaml")).unwrap();
+
+    assert!(matches!(
+        &loaded.tools["ida-pro"].release,
+        ReleaseConfig::Manual {}
+    ));
+    assert!(loaded.tools["ida-pro"].artifacts.is_empty());
+}
+
+#[test]
+fn rejects_artifacts_for_manual_release() {
+    assert_invalid_tool(
+        r#"
+tools:
+  ida-pro:
+    release:
+      type: manual
+    artifacts:
+      - type: direct-url
+        url: https://example.com/ida-pro.zip
+    install:
+      destination: Reverse/Decompiler/IDA Pro
+"#,
+        "manual tools are maintained manually and must not configure artifacts",
+    );
+}
+
+#[test]
+fn rejects_unknown_manual_release_fields() {
+    assert_invalid_tool(
+        r#"
+tools:
+  ida-pro:
+    release:
+      type: manual
+      repository: owner/ida-pro
+    install:
+      destination: Reverse/Decompiler/IDA Pro
+"#,
+        "unknown field",
+    );
+}
+
 fn assert_invalid_tool(tool_file: &str, expected: &str) {
     assert_invalid_tool_with_manifest(
         r#"

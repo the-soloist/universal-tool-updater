@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::config::{AppConfig, Paths};
 use crate::display::width as display_width;
-use crate::domain::{InputMode, NetworkConfig, Tool};
+use crate::domain::{InputMode, NetworkConfig, ReleaseConfig, Tool};
 use crate::test_support::tool as test_tool;
 
 use super::render_distribution;
@@ -117,4 +117,27 @@ fn filters_the_distribution_by_profile() {
     assert!(rendered.starts_with("工具分布 · 1 个工具\n"));
     assert!(rendered.contains("JADX"));
     assert!(!rendered.contains("Web"));
+}
+
+#[test]
+fn marks_manual_tools_in_the_tree() {
+    let mut manual = tool(
+        "ida-pro",
+        "IDA Pro",
+        "reverse",
+        "Reverse/Decompiler/IDA Pro",
+        InputMode::Extract,
+        true,
+    );
+    manual.release = ReleaseConfig::Manual {};
+    let tools = [manual]
+        .into_iter()
+        .map(|tool| (tool.id.clone(), tool))
+        .collect::<BTreeMap<_, _>>();
+    let mut config = config();
+    config.tools = tools;
+
+    let rendered = render_distribution(&config, &[], 120).unwrap();
+
+    assert!(rendered.contains("IDA Pro [manual]"));
 }

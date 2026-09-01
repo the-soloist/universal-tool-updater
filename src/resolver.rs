@@ -58,6 +58,10 @@ impl Resolver {
                 url,
                 version_headers,
             } => http::resolve(&self.client, tool, url, version_headers),
+            ReleaseConfig::Manual {} => Err(anyhow::anyhow!(
+                "tool {} is maintained manually and has no release to resolve",
+                tool.id
+            )),
         }
     }
 }

@@ -93,6 +93,8 @@ pub enum ReleaseConfig {
         #[serde(default = "default_version_headers")]
         version_headers: Vec<String>,
     },
+    /// A registered tool whose releases are maintained outside the updater.
+    Manual {},
 }
 
 fn default_version_headers() -> Vec<String> {

@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 
 use crate::config::AppConfig;
 use crate::display::{pad_right, sanitize_control_chars, width as display_width};
-use crate::domain::{UpdateResult, UpdateStatus};
+use crate::domain::{ReleaseConfig, Tool, UpdateResult, UpdateStatus};
 use anyhow::Result;
 use console::{Style, Term};
 
@@ -17,15 +17,29 @@ pub(super) fn list_tools(config: &AppConfig, profiles: &[String]) -> Result<()> 
         .collect::<Vec<_>>();
     tools.sort_by_cached_key(|tool| list_sort_key(&tool.profile, &tool.name, &tool.id));
 
+    print!("{}", render_tool_list(&tools));
+    Ok(())
+}
+
+fn render_tool_list(tools: &[&Tool]) -> String {
+    let mut output = String::new();
     for tool in tools {
-        println!(
-            "{:<32} {:<12} {}",
+        let marker = if matches!(tool.release, ReleaseConfig::Manual {}) {
+            "  [manual]"
+        } else {
+            ""
+        };
+        writeln!(
+            &mut output,
+            "{:<32} {:<12} {}{}",
             tool.id,
             tool.profile,
-            tool.install.destination.display()
-        );
+            tool.install.destination.display(),
+            marker
+        )
+        .expect("writing to a String cannot fail");
     }
-    Ok(())
+    output
 }
 
 fn list_sort_key(profile: &str, name: &str, id: &str) -> (String, String, String) {
@@ -242,11 +256,24 @@ fn split_index(value: &str, max_width: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use crate::domain::{UpdateResult, UpdateStatus};
+    use crate::domain::{ReleaseConfig, UpdateResult, UpdateStatus};
 
     use crate::display::width as display_width;
+    use crate::test_support::tool as test_tool;
 
-    use super::{list_sort_key, render_summary};
+    use super::{list_sort_key, render_summary, render_tool_list};
+
+    #[test]
+    fn tool_list_marks_manual_tools() {
+        let mut manual = test_tool("ida-pro", "/toolkit/Reverse/IDA");
+        manual.release = ReleaseConfig::Manual {};
+        let automatic = test_tool("jadx", "/toolkit/Reverse/JADX");
+
+        let rendered = render_tool_list(&[&manual, &automatic]);
+
+        assert!(rendered.lines().next().unwrap().contains("[manual]"));
+        assert!(!rendered.lines().nth(1).unwrap().contains("[manual]"));
+    }
 
     #[test]
     fn tools_are_sorted_by_profile_then_name_case_insensitively() {

@@ -72,6 +72,49 @@ network:
     );
 }
 
+#[test]
+fn update_skips_manual_release_without_network_access() {
+    let directory = tempdir().unwrap();
+    fs::write(
+        directory.path().join("manifest.yaml"),
+        r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+"#,
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("tools.yaml"),
+        r#"
+tools:
+  ida-pro:
+    name: IDA Pro
+    release:
+      type: manual
+    install:
+      destination: Reverse/Decompiler/IDA Pro
+"#,
+    )
+    .unwrap();
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_updater"));
+    let output = command
+        .arg("--profiles")
+        .arg(directory.path())
+        .arg("--log-dir")
+        .arg(directory.path().join("logs"))
+        .args(["update", "ida-pro", "--no-progress"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("skipped"), "{stdout}");
+    assert!(stdout.contains("maintained manually"), "{stdout}");
+}
+
 fn updater(profiles: &std::path::Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_updater"));
     command
