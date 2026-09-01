@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::{self, BufReader, Read, Write};
+use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Component, Path};
 
 use anyhow::Result;
@@ -14,10 +14,12 @@ use zip::{CompressionMethod, read::ZipFile};
 
 use crate::error::UpdaterError;
 
+const IO_BUFFER_BYTES: usize = 256 * 1024;
+
 pub(super) fn zip(archive_path: &Path, destination: &Path, password: Option<&str>) -> Result<()> {
     let file = File::open(archive_path)?;
-    let mut archive =
-        zip::ZipArchive::new(BufReader::new(file)).map_err(|error| UpdaterError::Archive {
+    let mut archive = zip::ZipArchive::new(BufReader::with_capacity(IO_BUFFER_BYTES, file))
+        .map_err(|error| UpdaterError::Archive {
             path: archive_path.to_path_buf(),
             message: error.to_string(),
         })?;
@@ -69,8 +71,7 @@ pub(super) fn zip(archive_path: &Path, destination: &Path, password: Option<&str
         if let Some(parent) = output.parent() {
             fs::create_dir_all(parent)?;
         }
-        let mut file = File::create(&output)?;
-        io::copy(&mut entry, &mut file)?;
+        copy_buffered(&mut entry, File::create(&output)?)?;
         #[cfg(unix)]
         set_zip_permissions(&output, &entry)?;
     }
@@ -162,7 +163,10 @@ fn extract_zip_lzma<R: Read, W: Write>(
         .map_err(|error| lzma_error(archive, error.to_string()))?;
     let mut output = CheckedZipWriter::new(output);
     decoder
-        .decompress(&mut BufReader::new(input), &mut output)
+        .decompress(
+            &mut BufReader::with_capacity(IO_BUFFER_BYTES, input),
+            &mut output,
+        )
         .map_err(|error| lzma_error(archive, error.to_string()))?;
     let (written, actual_crc32) = output
         .finish()
@@ -193,7 +197,7 @@ struct CheckedZipWriter<W: Write> {
 impl<W: Write> CheckedZipWriter<W> {
     fn new(inner: W) -> Self {
         Self {
-            inner: std::io::BufWriter::new(inner),
+            inner: BufWriter::with_capacity(IO_BUFFER_BYTES, inner),
             crc32: CrcDigest::new(CrcAlgorithm::Crc32IsoHdlc),
             written: 0,
         }
@@ -297,23 +301,57 @@ pub(super) fn rar(archive: &Path, destination: &Path, password: Option<&str>) ->
 }
 
 pub(super) fn tar_gzip(archive: &Path, destination: &Path) -> Result<()> {
-    extract_tar(GzDecoder::new(File::open(archive)?), archive, destination)
+    extract_tar(
+        GzDecoder::new(buffered_archive(archive)?),
+        archive,
+        destination,
+    )
 }
 
 pub(super) fn tar_bzip2(archive: &Path, destination: &Path) -> Result<()> {
-    extract_tar(BzDecoder::new(File::open(archive)?), archive, destination)
+    extract_tar(
+        BzDecoder::new(buffered_archive(archive)?),
+        archive,
+        destination,
+    )
 }
 
 pub(super) fn tar_xz(archive: &Path, destination: &Path) -> Result<()> {
-    extract_tar(XzDecoder::new(File::open(archive)?), archive, destination)
+    extract_tar(
+        XzDecoder::new(buffered_archive(archive)?),
+        archive,
+        destination,
+    )
 }
 
 pub(super) fn gzip(archive: &Path, destination: &Path) -> Result<()> {
-    extract_single(GzDecoder::new(File::open(archive)?), archive, destination)
+    extract_single(
+        GzDecoder::new(buffered_archive(archive)?),
+        archive,
+        destination,
+    )
 }
 
 pub(super) fn xz(archive: &Path, destination: &Path) -> Result<()> {
-    extract_single(XzDecoder::new(File::open(archive)?), archive, destination)
+    extract_single(
+        XzDecoder::new(buffered_archive(archive)?),
+        archive,
+        destination,
+    )
+}
+
+fn buffered_archive(archive: &Path) -> io::Result<BufReader<File>> {
+    Ok(BufReader::with_capacity(
+        IO_BUFFER_BYTES,
+        File::open(archive)?,
+    ))
+}
+
+fn copy_buffered<R: Read, W: Write>(input: &mut R, output: W) -> io::Result<u64> {
+    let mut output = BufWriter::with_capacity(IO_BUFFER_BYTES, output);
+    let copied = io::copy(input, &mut output)?;
+    output.flush()?;
+    Ok(copied)
 }
 
 fn extract_tar<R: io::Read>(reader: R, archive_path: &Path, destination: &Path) -> Result<()> {
@@ -368,5 +406,58 @@ fn safe_rar_member_path(value: &str) -> Option<&Path> {
         None
     } else {
         Some(path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, Read, Write};
+
+    use super::{IO_BUFFER_BYTES, copy_buffered};
+
+    #[derive(Default)]
+    struct CountingWriter {
+        bytes: usize,
+        calls: usize,
+    }
+
+    struct ChunkedReader<'a> {
+        remaining: &'a [u8],
+    }
+
+    impl Read for ChunkedReader<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let read = self.remaining.len().min(buffer.len()).min(8 * 1024);
+            buffer[..read].copy_from_slice(&self.remaining[..read]);
+            self.remaining = &self.remaining[read..];
+            Ok(read)
+        }
+    }
+
+    impl Write for CountingWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.bytes += buffer.len();
+            self.calls += 1;
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn output_buffer_coalesces_small_copy_writes() {
+        let payload = vec![0_u8; IO_BUFFER_BYTES * 2 + 1];
+        let mut input = ChunkedReader {
+            remaining: &payload,
+        };
+        let mut output = CountingWriter::default();
+
+        let copied = copy_buffered(&mut input, &mut output).unwrap();
+
+        assert_eq!(copied, payload.len() as u64);
+        assert_eq!(output.bytes, payload.len());
+        assert_eq!(output.calls, 3);
     }
 }
