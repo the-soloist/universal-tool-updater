@@ -40,12 +40,14 @@ impl Resolver {
             ReleaseConfig::Github {
                 repository,
                 ignore_versions,
+                allow_prereleases,
             } => github::resolve(
                 &self.client,
                 self.github_token.as_deref(),
                 tool,
                 repository,
                 ignore_versions,
+                *allow_prereleases,
             ),
             ReleaseConfig::Web {
                 url,

@@ -177,10 +177,12 @@ release:
   repository: fatedier/frp
   ignore_versions:
     - v0.70.0
+  allow_prereleases: false
 ```
 
 - `repository` 必须为合法的 `owner/repository`，不能包含 URL 或多余路径。
 - `ignore_versions` 可省略，用于跳过指定 release tag；条目不能为空或重复。
+- `allow_prereleases` 可省略，默认 `false`；设为 `true` 才会选择 GitHub prerelease。使用 API 时按 release 标记过滤，使用 Atom 时按 semver tag 的预发布段过滤；无法解析为 semver 的 tag 保持可用。
 - 配置 GitHub token 后通过 API 解析 release；未配置 token 时使用公开 release 信息。
 
 ### 4.2 Web 页面

@@ -2,7 +2,7 @@ use std::fs;
 
 use tempfile::tempdir;
 use universal_tool_updater::config;
-use universal_tool_updater::config::model::{ManifestFile, OutputMode};
+use universal_tool_updater::config::model::{ManifestFile, OutputMode, ReleaseConfig};
 
 #[test]
 fn reads_parallel_jobs_from_the_manifest() {
@@ -257,6 +257,63 @@ tools:
     assert_eq!(loaded.tools.len(), 1);
     assert_eq!(loaded.tools["demo"].profile, "web");
     assert_eq!(loaded.paths.staging, loaded.paths.downloads.join("staging"));
+}
+
+#[test]
+fn reads_the_github_prerelease_opt_in_without_changing_schema_version() {
+    let directory = tempdir().unwrap();
+    fs::write(
+        directory.path().join("manifest.yaml"),
+        r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+"#,
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("tools.yaml"),
+        r#"
+tools:
+  stable:
+    release:
+      type: github
+      repository: owner/stable
+    artifacts:
+      - type: github-asset
+        pattern: stable.zip
+    install:
+      destination: Stable
+  cutting-edge:
+    release:
+      type: github
+      repository: owner/cutting-edge
+      allow_prereleases: true
+    artifacts:
+      - type: github-asset
+        pattern: edge.zip
+    install:
+      destination: CuttingEdge
+"#,
+    )
+    .unwrap();
+
+    let loaded = config::load(&directory.path().join("manifest.yaml")).unwrap();
+    assert!(matches!(
+        loaded.tools["stable"].release,
+        ReleaseConfig::Github {
+            allow_prereleases: false,
+            ..
+        }
+    ));
+    assert!(matches!(
+        loaded.tools["cutting-edge"].release,
+        ReleaseConfig::Github {
+            allow_prereleases: true,
+            ..
+        }
+    ));
 }
 
 #[test]

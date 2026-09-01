@@ -16,6 +16,7 @@ tools:
       repository: sharkdp/bat
       ignore_versions:
         - v0.24.0
+      # allow_prereleases: true
     artifacts:
       - type: github-asset
         pattern: '^bat-v[^/]+-x86_64-pc-windows-msvc\.zip$'

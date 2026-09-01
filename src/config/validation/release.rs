@@ -14,6 +14,7 @@ pub(super) fn validate(path: &Path, id: &str, release: &ReleaseConfig) -> Result
         ReleaseConfig::Github {
             repository,
             ignore_versions,
+            ..
         } => {
             let mut parts = repository.split('/');
             let owner = parts.next();

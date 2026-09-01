@@ -101,6 +101,9 @@ pub(super) fn resolve(
         } else {
             filename_from_url(&resolved_url)
         };
+        if matches!(artifact, ArtifactConfig::PageLink { .. }) {
+            validate_scraped_url(tool, &resolved_url)?;
+        }
         artifacts.push(ResolvedArtifact {
             filename,
             url: resolved_url,
@@ -113,9 +116,25 @@ fn normalize_page_link(value: &str) -> String {
     value.replace("\\/", "/").replace("&amp;", "&")
 }
 
+fn validate_scraped_url(tool: &Tool, value: &str) -> std::result::Result<(), UpdaterError> {
+    let rejected = |reason: String| UpdaterError::Resolution {
+        tool: tool.id.clone(),
+        message: format!("scraped download URL {value:?} rejected: {reason}"),
+    };
+    let parsed = Url::parse(value).map_err(|error| rejected(format!("invalid URL: {error}")))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(rejected(
+            "URL must use HTTP or HTTPS and include a host".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::normalize_page_link;
+    use crate::test_support::tool as test_tool;
+
+    use super::{normalize_page_link, validate_scraped_url};
 
     #[test]
     fn normalizes_json_and_html_escaped_page_links() {
@@ -125,5 +144,17 @@ mod tests {
             ),
             "https://gobies.org/download/release?type=full_url&id=355"
         );
+    }
+
+    #[test]
+    fn accepts_only_http_page_links_with_a_host() {
+        let tool = test_tool("demo", "/toolkit/demo");
+
+        assert!(validate_scraped_url(&tool, "https://example.com/tool.zip").is_ok());
+        assert!(validate_scraped_url(&tool, "http://example.com/tool.zip").is_ok());
+        for value in ["file:///tmp/tool.zip", "javascript:alert(1)"] {
+            let error = validate_scraped_url(&tool, value).unwrap_err();
+            assert!(error.to_string().contains("include a host"));
+        }
     }
 }
