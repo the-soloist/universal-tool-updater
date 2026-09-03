@@ -235,6 +235,231 @@ fn recognizes_every_documented_archive_extension_case_insensitively() {
     assert!(!ArchiveService::default().is_supported(Path::new("tool.exe")));
 }
 
+#[test]
+fn rejects_tar_symlinks_and_hardlinks_by_default() {
+    let directory = tempdir().unwrap();
+    let archives = [
+        (
+            "symlink.tar.gz",
+            gzip(&tar_link_with_target(tar::EntryType::Symlink, "tool.txt")),
+            "symbolic link",
+        ),
+        (
+            "hardlink.tar.gz",
+            gzip(&tar_link_with_target(tar::EntryType::Link, "tool.txt")),
+            "hard link",
+        ),
+    ];
+
+    for (name, contents, kind) in archives {
+        let archive = directory.path().join(name);
+        fs::write(&archive, contents).unwrap();
+        let output = directory.path().join(format!("output-{name}"));
+        let error = ArchiveService::default()
+            .extract_for_tool("demo", false, &archive, &output, None)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains(kind),
+            "expected {kind} rejection, got {error:#}"
+        );
+        assert!(
+            error.to_string().contains("bin/link"),
+            "expected the entry name, got {error:#}"
+        );
+        assert!(
+            error.to_string().contains("tool demo"),
+            "expected tool attribution, got {error:#}"
+        );
+        assert!(!output.join("bin/link").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn allows_tar_links_only_when_opted_in_and_bounded() {
+    let directory = tempdir().unwrap();
+    let archive_path = directory.path().join("links.tar.gz");
+    fs::write(
+        &archive_path,
+        gzip(&tar_link_with_target(tar::EntryType::Symlink, "tool.txt")),
+    )
+    .unwrap();
+    let output = directory.path().join("output");
+    ArchiveService::default()
+        .extract_for_tool("demo", true, &archive_path, &output, None)
+        .unwrap();
+    assert!(
+        fs::symlink_metadata(output.join("bin/link"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[test]
+fn rejects_tar_links_that_escape_the_extraction_directory_when_opted_in() {
+    let directory = tempdir().unwrap();
+    // bin/ + ../../ 落在解压根目录之外；单独的 ../ 不会。
+    let archive_path = directory.path().join("escaping.tar.gz");
+    fs::write(
+        &archive_path,
+        gzip(&tar_link_with_target(
+            tar::EntryType::Symlink,
+            "../../outside",
+        )),
+    )
+    .unwrap();
+
+    let error = ArchiveService::default()
+        .extract_for_tool(
+            "demo",
+            true,
+            &archive_path,
+            &directory.path().join("escaping"),
+            None,
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("escapes the extraction directory"),
+        "expected an escape rejection, got {error:#}"
+    );
+}
+
+#[test]
+fn rejects_absolute_tar_link_targets_even_when_opted_in() {
+    let directory = tempdir().unwrap();
+    let target = if cfg!(windows) {
+        r"C:\Windows\system32"
+    } else {
+        "/etc/passwd"
+    };
+    let archive_path = directory.path().join("absolute.tar.gz");
+    fs::write(
+        &archive_path,
+        gzip(&tar_link_with_target(tar::EntryType::Symlink, target)),
+    )
+    .unwrap();
+
+    let error = ArchiveService::default()
+        .extract_for_tool(
+            "demo",
+            true,
+            &archive_path,
+            &directory.path().join("output"),
+            None,
+        )
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("must be relative"),
+        "expected an absolute-target rejection, got {error:#}"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn creates_tar_directory_symlinks_followable_on_windows() {
+    for symlink_first in [false, true] {
+        let directory = tempdir().unwrap();
+        let archive_path = directory.path().join("dir-link.tar.gz");
+        fs::write(&archive_path, gzip(&tar_directory_symlink(symlink_first))).unwrap();
+        let output = directory.path().join("output");
+
+        ArchiveService::default()
+            .extract_for_tool("demo", true, &archive_path, &output, None)
+            .unwrap();
+
+        let link = output.join("bin/dir-link");
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        // 文件符号链接指向目录时无法跟随；只有 symlink_dir 能当作目录访问。
+        assert!(link.metadata().unwrap().is_dir());
+        assert_eq!(
+            fs::read_to_string(link.join("data.txt")).unwrap(),
+            "payload"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn creates_tar_directory_symlinks_with_relative_targets_when_opted_in() {
+    for symlink_first in [false, true] {
+        let directory = tempdir().unwrap();
+        let archive_path = directory.path().join("dir-link.tar.gz");
+        fs::write(&archive_path, gzip(&tar_directory_symlink(symlink_first))).unwrap();
+        let output = directory.path().join("output");
+
+        ArchiveService::default()
+            .extract_for_tool("demo", true, &archive_path, &output, None)
+            .unwrap();
+
+        assert_eq!(
+            fs::read_link(output.join("bin/dir-link")).unwrap(),
+            Path::new("../share")
+        );
+        assert_eq!(
+            fs::read_to_string(output.join("bin/dir-link/data.txt")).unwrap(),
+            "payload"
+        );
+    }
+}
+
+#[test]
+fn rejects_rar_link_members_by_default() {
+    let directory = tempdir().unwrap();
+    let archive_path = directory.path().join("links.rar");
+    let output_path = directory.path().join("output");
+    fs::write(
+        &archive_path,
+        stored_rar5_symlink("bin/link", "bin/tool.txt"),
+    )
+    .unwrap();
+
+    let error = ArchiveService::default()
+        .extract_for_tool("demo", false, &archive_path, &output_path, None)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("symbolic link"),
+        "expected link rejection, got {error:#}"
+    );
+    assert!(
+        error.to_string().contains("bin/link"),
+        "expected the member name, got {error:#}"
+    );
+    assert!(
+        error.to_string().contains("tool demo"),
+        "expected tool attribution, got {error:#}"
+    );
+}
+
+#[test]
+fn rejects_rar_links_that_escape_the_extraction_directory_when_opted_in() {
+    let directory = tempdir().unwrap();
+    let archive_path = directory.path().join("escaping.rar");
+    let output_path = directory.path().join("output");
+    fs::write(
+        &archive_path,
+        stored_rar5_symlink("bin/link", "../../outside"),
+    )
+    .unwrap();
+
+    let error = ArchiveService::default()
+        .extract_for_tool("demo", true, &archive_path, &output_path, None)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("escapes the extraction directory"),
+        "expected an escape rejection, got {error:#}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn strips_privilege_bits_from_zip_permissions() {
@@ -283,7 +508,7 @@ fn rejects_archives_exceeding_the_byte_quota() {
     std::io::Write::write_all(&mut archive, b"0123456789").unwrap();
     archive.finish().unwrap();
     let error = service
-        .extract_for_tool("demo", &archive_path, &output_path, None)
+        .extract_for_tool("demo", false, &archive_path, &output_path, None)
         .unwrap_err();
     assert!(
         error.to_string().contains("tool demo"),
@@ -302,7 +527,7 @@ fn rejects_archives_exceeding_the_byte_quota() {
     fs::write(&single, gzip(b"0123456789")).unwrap();
     assert!(
         service
-            .extract_for_tool("demo", &single, &output_path, None)
+            .extract_for_tool("demo", false, &single, &output_path, None)
             .is_err()
     );
 }
@@ -327,7 +552,7 @@ fn rejects_archives_exceeding_the_entry_quota() {
         max_entries: 1,
     });
     let error = service
-        .extract_for_tool("demo", &archive_path, &output_path, None)
+        .extract_for_tool("demo", false, &archive_path, &output_path, None)
         .unwrap_err();
     assert!(
         error.to_string().contains("max_entries 1"),
@@ -360,7 +585,7 @@ fn interrupts_zip_entries_whose_real_output_exceeds_the_quota() {
         max_entries: 100,
     });
     let error = service
-        .extract_for_tool("demo", &archive_path, &output_path, None)
+        .extract_for_tool("demo", false, &archive_path, &output_path, None)
         .unwrap_err();
     assert!(
         error.to_string().contains("max_total_bytes 16384"),
@@ -398,7 +623,7 @@ fn rejects_pax_size_overrides_before_writing_tar_entries() {
         max_entries: 100,
     });
     let error = service
-        .extract_for_tool("demo", &archive_path, &output_path, None)
+        .extract_for_tool("demo", false, &archive_path, &output_path, None)
         .unwrap_err();
 
     assert!(
@@ -430,7 +655,7 @@ fn interrupts_rar_members_with_unknown_size_at_the_quota() {
         max_entries: 100,
     });
     let error = service
-        .extract_for_tool("demo", &archive_path, &output_path, None)
+        .extract_for_tool("demo", false, &archive_path, &output_path, None)
         .unwrap_err();
     assert!(
         error.to_string().contains("tool demo"),
@@ -671,4 +896,118 @@ fn encode_vint(mut value: u64) -> Vec<u8> {
             return encoded;
         }
     }
+}
+
+/// 手写 tar Header 构造一个普通文件加一个链接条目，跨平台无文件系统副作用。
+fn tar_link_with_target(entry_type: tar::EntryType, target: &str) -> Vec<u8> {
+    let mut output = Vec::new();
+    {
+        let mut archive = tar::Builder::new(&mut output);
+        let contents = b"payload";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("bin/tool.txt").unwrap();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        archive.append(&header, contents.as_slice()).unwrap();
+
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(entry_type);
+        header.set_path("bin/link").unwrap();
+        header.set_size(0);
+        header.set_mode(0o644);
+        header.set_link_name(target).unwrap();
+        header.set_cksum();
+        archive.append(&header, std::io::empty()).unwrap();
+        archive.finish().unwrap();
+    }
+    output
+}
+
+/// 手写 tar Header 构造一个普通文件加一个指向目录的符号链接条目。
+fn tar_directory_symlink(symlink_first: bool) -> Vec<u8> {
+    let mut output = Vec::new();
+    {
+        let mut archive = tar::Builder::new(&mut output);
+        if symlink_first {
+            append_tar_directory_symlink(&mut archive);
+            append_tar_directory_target(&mut archive);
+        } else {
+            append_tar_directory_target(&mut archive);
+            append_tar_directory_symlink(&mut archive);
+        }
+        archive.finish().unwrap();
+    }
+    output
+}
+
+fn append_tar_directory_target<W: Write>(archive: &mut tar::Builder<W>) {
+    let contents = b"payload";
+    let mut header = tar::Header::new_gnu();
+    header.set_path("share/data.txt").unwrap();
+    header.set_size(contents.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    archive.append(&header, contents.as_slice()).unwrap();
+}
+
+fn append_tar_directory_symlink<W: Write>(archive: &mut tar::Builder<W>) {
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Symlink);
+    header.set_path("bin/dir-link").unwrap();
+    header.set_size(0);
+    header.set_mode(0o644);
+    header.set_link_name("../share").unwrap();
+    header.set_cksum();
+    archive.append(&header, std::io::empty()).unwrap();
+}
+
+/// 构造单成员 RAR5 归档：文件头携带 Unix symlink 重定向记录
+/// （extra record 类型 5，重定向类型 1）。
+fn stored_rar5_symlink(member: &str, target: &str) -> Vec<u8> {
+    let mut redirection = Vec::new();
+    redirection.extend_from_slice(&encode_vint(1));
+    redirection.extend_from_slice(&encode_vint(0));
+    redirection.extend_from_slice(&encode_vint(target.len() as u64));
+    redirection.extend_from_slice(target.as_bytes());
+
+    // 记录大小覆盖类型 vint 与重定向体。
+    let mut extra = Vec::new();
+    extra.extend_from_slice(&encode_vint(redirection.len() as u64 + 1));
+    extra.extend_from_slice(&encode_vint(5));
+    extra.extend_from_slice(&redirection);
+
+    let mut file_body = Vec::new();
+    file_body.extend_from_slice(&encode_vint(0));
+    file_body.extend_from_slice(&encode_vint(0));
+    file_body.extend_from_slice(&encode_vint(0o777));
+    file_body.extend_from_slice(&encode_vint(0));
+    file_body.extend_from_slice(&encode_vint(1));
+    file_body.extend_from_slice(&encode_vint(member.len() as u64));
+    file_body.extend_from_slice(member.as_bytes());
+    file_body.extend_from_slice(&extra);
+
+    let mut archive = b"Rar!\x1a\x07\x01\x00".to_vec();
+    archive.extend_from_slice(&rar5_header(1, 0, &encode_vint(0)));
+    archive.extend_from_slice(&rar5_file_header_with_extra(&file_body, extra.len()));
+    archive.extend_from_slice(&rar5_header(5, 0, &encode_vint(0)));
+    archive
+}
+
+/// RAR5 文件头变体：公共标志声明存在 extra 区，使重定向记录可被解析。
+fn rar5_file_header_with_extra(type_body: &[u8], extra_size: usize) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&encode_vint(2));
+    body.extend_from_slice(&encode_vint(0x0001));
+    body.extend_from_slice(&encode_vint(extra_size as u64));
+    body.extend_from_slice(type_body);
+
+    let size = encode_vint(body.len() as u64);
+    let mut checksummed = size.clone();
+    checksummed.extend_from_slice(&body);
+    let mut header = (crc_fast::crc32_iso_hdlc(&checksummed) as u32)
+        .to_le_bytes()
+        .to_vec();
+    header.extend_from_slice(&checksummed);
+    header
 }

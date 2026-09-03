@@ -9,7 +9,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use artifact::ArtifactPreparer;
-use filesystem::{apply_executable_bits, copy_tree, single_directory_base};
+use filesystem::{apply_executable_bits, copy_tree, single_directory_base, verify_staged_links};
 use output::{effective_mode, managed_archive_path, render_archive_name};
 use transaction::{CommitRequest, CommitSource, commit, same_filesystem};
 
@@ -138,6 +138,15 @@ impl<'a> Installer<'a> {
                 unpacked
             };
             copy_tree(&source, &combined)?;
+        }
+
+        // 提升与合并改变了链接的相对边界；opt-in 放行过链接时，
+        // 以最终组合目录为根复验，防止解压时界内的目标在此越界。
+        if tool.install.allow_symlinks_in_archive {
+            verify_staged_links(&combined).map_err(|error| UpdaterError::Installation {
+                tool: tool.id.clone(),
+                message: error.to_string(),
+            })?;
         }
 
         apply_executable_bits(tool, &combined)?;

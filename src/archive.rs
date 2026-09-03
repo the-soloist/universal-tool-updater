@@ -1,4 +1,4 @@
-mod extract;
+pub(crate) mod extract;
 #[cfg(test)]
 mod tests;
 
@@ -38,10 +38,11 @@ impl ExtractionLimits {
     }
 }
 
-/// 单次解压贯穿的工具归属与配额上下文。
+/// 单次解压贯穿的工具归属、链接策略与配额上下文。
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ExtractionContext<'a> {
     pub(crate) tool_id: Option<&'a str>,
+    pub(crate) allow_symlinks: bool,
     pub(crate) limits: ExtractionLimits,
 }
 
@@ -61,29 +62,39 @@ impl ArchiveService {
         destination: &Path,
         password: Option<&str>,
     ) -> Result<()> {
-        self.extract_with(None, archive, destination, password)
+        self.extract_with(None, false, archive, destination, password)
     }
 
-    /// 工具作用域解压：配额违规的错误信息会带上工具 ID。
+    /// 工具作用域解压：链接条目的拒绝错误会带上工具 ID，
+    /// 含链接的归档仅在工具显式开启 opt-in 时放行；配额违规也会带上工具 ID。
     pub(crate) fn extract_for_tool(
         &self,
         tool_id: &str,
+        allow_symlinks: bool,
         archive: &Path,
         destination: &Path,
         password: Option<&str>,
     ) -> Result<()> {
-        self.extract_with(Some(tool_id), archive, destination, password)
+        self.extract_with(
+            Some(tool_id),
+            allow_symlinks,
+            archive,
+            destination,
+            password,
+        )
     }
 
     fn extract_with(
         &self,
         tool_id: Option<&str>,
+        allow_symlinks: bool,
         archive: &Path,
         destination: &Path,
         password: Option<&str>,
     ) -> Result<()> {
         let context = ExtractionContext {
             tool_id,
+            allow_symlinks,
             limits: self.limits,
         };
         fs::create_dir_all(destination).with_context(|| {

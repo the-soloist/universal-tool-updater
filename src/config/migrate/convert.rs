@@ -65,6 +65,7 @@ pub(super) fn convert_tool(
             .into_iter()
             .map(PathBuf::from)
             .collect(),
+        allow_symlinks_in_archive: false,
         symlinks: symlinks(legacy, name)?,
     };
     let hooks = HookConfig {

@@ -214,6 +214,8 @@ pub struct InstallSpec {
     pub create_destination: bool,
     pub archive_name: String,
     pub archive_password: Option<String>,
+    /// Opt-in flag: archives containing symbolic or hard links are rejected by default.
+    pub allow_symlinks_in_archive: bool,
     pub executable: Vec<PathBuf>,
     pub symlinks: Vec<SymlinkSpec>,
 }

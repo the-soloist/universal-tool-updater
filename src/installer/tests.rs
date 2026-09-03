@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 
 use tempfile::tempdir;
 
@@ -355,4 +356,132 @@ fn recognizes_only_updater_managed_archives_for_merging() {
     let pattern = managed_archive_pattern(&tool);
     assert!(pattern.is_match("Demo#1.2.3.7z"));
     assert!(!pattern.is_match("third-party.7z"));
+}
+
+#[test]
+fn rejects_links_that_escape_after_single_root_promotion() {
+    let directory = tempdir().unwrap();
+    let toolkit = directory.path().join("Toolkit");
+    let downloads = toolkit.join("updates");
+    let destination = toolkit.join("Demo");
+    fs::create_dir_all(&downloads).unwrap();
+
+    // pkg/bin/link -> ../../outside 从解压根看界内；strip_single_root 提升
+    // pkg 后目标越出最终安装目录。
+    let artifact = downloads.join("demo.tar.gz");
+    fs::write(&artifact, pkg_tar_gz("../../outside")).unwrap();
+
+    let mut tool = test_tool("demo", destination.clone());
+    tool.name = "Demo".to_owned();
+    tool.artifacts = vec![ArtifactConfig::DirectUrl {
+        url: "https://example.com/demo.tar.gz".to_owned(),
+    }];
+    tool.install.allow_symlinks_in_archive = true;
+    let archive_service = ArchiveService::default();
+    let hook_runner = HookRunner;
+    let installer = Installer::new(&archive_service, &hook_runner, directory.path(), &toolkit);
+    let run = RunWorkspace::create(&downloads, &downloads.join("staging")).unwrap();
+    let workspace = run.prepare(&tool).unwrap();
+    let progress = ProgressManager::new(false, 1);
+    let task_progress = progress.task(&tool.profile, &tool.name);
+
+    let error = installer
+        .install(
+            &tool,
+            "v2",
+            &[DownloadedArtifact { path: artifact }],
+            &workspace,
+            &task_progress,
+            InstallOptions::new(1, ExistingArchiveStatus::Unchecked),
+        )
+        .unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("tool demo"),
+        "expected tool attribution, got {message}"
+    );
+    let staged_link = format!("{:?}", std::path::Path::new("bin").join("link"));
+    assert!(
+        message.contains(&staged_link),
+        "expected the staged link path {staged_link}, got {message}"
+    );
+    assert!(
+        message.contains("escapes the extraction directory"),
+        "expected an escape rejection, got {message}"
+    );
+    assert!(!destination.exists());
+}
+
+#[test]
+fn accepts_promoted_links_that_stay_within_the_installation() {
+    let directory = tempdir().unwrap();
+    let toolkit = directory.path().join("Toolkit");
+    let downloads = toolkit.join("updates");
+    let destination = toolkit.join("Demo");
+    fs::create_dir_all(&downloads).unwrap();
+
+    // pkg/bin/link -> ../tool.txt 在提升前后都界内。
+    let artifact = downloads.join("demo.tar.gz");
+    fs::write(&artifact, pkg_tar_gz("../tool.txt")).unwrap();
+
+    let mut tool = test_tool("demo", destination.clone());
+    tool.name = "Demo".to_owned();
+    tool.artifacts = vec![ArtifactConfig::DirectUrl {
+        url: "https://example.com/demo.tar.gz".to_owned(),
+    }];
+    tool.install.allow_symlinks_in_archive = true;
+    let archive_service = ArchiveService::default();
+    let hook_runner = HookRunner;
+    let installer = Installer::new(&archive_service, &hook_runner, directory.path(), &toolkit);
+    let run = RunWorkspace::create(&downloads, &downloads.join("staging")).unwrap();
+    let workspace = run.prepare(&tool).unwrap();
+    let progress = ProgressManager::new(false, 1);
+    let task_progress = progress.task(&tool.profile, &tool.name);
+
+    installer
+        .install(
+            &tool,
+            "v2",
+            &[DownloadedArtifact { path: artifact }],
+            &workspace,
+            &task_progress,
+            InstallOptions::new(1, ExistingArchiveStatus::Unchecked),
+        )
+        .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(destination.join("tool.txt")).unwrap(),
+        "payload"
+    );
+    assert_eq!(
+        fs::read_to_string(destination.join("bin/link")).unwrap(),
+        "payload"
+    );
+}
+
+/// 构造 pkg 单根 tar.gz：pkg/tool.txt + pkg/bin/link -> link_target，
+/// strip_single_root 提升 pkg 后链接的相对边界随之改变。
+fn pkg_tar_gz(link_target: &str) -> Vec<u8> {
+    let mut archive = tar::Builder::new(Vec::new());
+    let payload = b"payload";
+    let mut header = tar::Header::new_gnu();
+    header.set_path("pkg/tool.txt").unwrap();
+    header.set_size(payload.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    archive.append(&header, payload.as_slice()).unwrap();
+
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Symlink);
+    header.set_path("pkg/bin/link").unwrap();
+    header.set_size(0);
+    header.set_mode(0o644);
+    header.set_link_name(link_target).unwrap();
+    header.set_cksum();
+    archive.append(&header, std::io::empty()).unwrap();
+    archive.finish().unwrap();
+
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&archive.into_inner().unwrap()).unwrap();
+    encoder.finish().unwrap()
 }

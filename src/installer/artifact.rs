@@ -33,12 +33,13 @@ impl<'a> ArtifactPreparer<'a> {
             InputMode::Extract if self.archive.is_supported(&artifact.path) => {
                 self.archive.extract_for_tool(
                     &tool.id,
+                    tool.install.allow_symlinks_in_archive,
                     &artifact.path,
                     &output,
                     tool.install.archive_password.as_deref(),
                 )?;
                 self.extract_nested_archive(
-                    &tool.id,
+                    tool,
                     &output,
                     tool.install.archive_password.as_deref(),
                 )?;
@@ -59,7 +60,7 @@ impl<'a> ArtifactPreparer<'a> {
 
     fn extract_nested_archive(
         &self,
-        tool_id: &str,
+        tool: &Tool,
         directory: &Path,
         password: Option<&str>,
     ) -> Result<()> {
@@ -71,8 +72,13 @@ impl<'a> ArtifactPreparer<'a> {
         if !nested.is_file() || !self.archive.is_supported(&nested) {
             return Ok(());
         }
-        self.archive
-            .extract_for_tool(tool_id, &nested, directory, password)?;
+        self.archive.extract_for_tool(
+            &tool.id,
+            tool.install.allow_symlinks_in_archive,
+            &nested,
+            directory,
+            password,
+        )?;
         fs::remove_file(nested)?;
         Ok(())
     }

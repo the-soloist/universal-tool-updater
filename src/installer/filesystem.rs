@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use walkdir::WalkDir;
 
+use crate::archive::extract::ensure_bounded_link_target;
 use crate::domain::Tool;
 use crate::error::UpdaterError;
 
@@ -45,6 +46,29 @@ pub(super) fn single_directory_base(directory: &Path) -> Result<PathBuf> {
     } else {
         Ok(directory.to_path_buf())
     }
+}
+
+/// strip_single_root 提升与多产物合并会改变链接的相对边界，解压时的
+/// 界内校验到此不再可靠；以最终组装目录为根复验全部符号链接。
+pub(super) fn verify_staged_links(root: &Path) -> Result<()> {
+    let root_canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    for entry in WalkDir::new(root).follow_links(false).min_depth(1) {
+        let entry = entry?;
+        if !entry.file_type().is_symlink() {
+            continue;
+        }
+        let member = entry.path().strip_prefix(root)?;
+        let target = fs::read_link(entry.path())?;
+        ensure_bounded_link_target(
+            root,
+            root,
+            &root_canonical,
+            "symbolic link",
+            member,
+            &target,
+        )?;
+    }
+    Ok(())
 }
 
 pub(super) fn apply_executable_bits(tool: &Tool, root: &Path) -> Result<()> {
