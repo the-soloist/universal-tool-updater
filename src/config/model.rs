@@ -17,6 +17,9 @@ pub struct ManifestFile {
     pub schema_version: u32,
     pub include: Vec<String>,
     pub paths: PathConfig,
+    /// Permits plain-HTTP download URLs; HTTPS remains the only default.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_insecure_transports: bool,
     #[serde(default)]
     pub network: NetworkConfig,
     #[serde(default)]
@@ -150,4 +153,39 @@ pub struct InstallConfig {
 pub struct SymlinkConfig {
     pub from: PathBuf,
     pub to: PathBuf,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ManifestFile;
+
+    const MINIMAL: &str = "
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: ~/Tools/Toolkit
+";
+
+    #[test]
+    fn manifest_defaults_the_transport_flag_to_false_and_omits_it() {
+        let manifest: ManifestFile = yaml_serde::from_str(MINIMAL).unwrap();
+        assert!(!manifest.allow_insecure_transports);
+        assert!(
+            !yaml_serde::to_string(&manifest)
+                .unwrap()
+                .contains("allow_insecure_transports")
+        );
+    }
+
+    #[test]
+    fn manifest_round_trips_an_explicit_transport_opt_in() {
+        let manifest: ManifestFile =
+            yaml_serde::from_str(&format!("{MINIMAL}allow_insecure_transports: true\n")).unwrap();
+        assert!(manifest.allow_insecure_transports);
+        assert!(
+            yaml_serde::to_string(&manifest)
+                .unwrap()
+                .contains("allow_insecure_transports: true")
+        );
+    }
 }

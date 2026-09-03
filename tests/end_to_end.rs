@@ -105,6 +105,7 @@ fn resolves_downloads_and_repairs_a_corrupt_merge_archive() {
             ..NetworkConfig::default()
         },
         defaults,
+        allow_insecure_transports: true,
         extraction_limits: ExtractionLimits::default(),
     };
     let manifest_path = config_dir.join("manifest.yaml");
@@ -265,6 +266,7 @@ fn runs_complete_tool_updates_in_parallel() {
             ..NetworkConfig::default()
         },
         defaults,
+        allow_insecure_transports: true,
         extraction_limits: ExtractionLimits::default(),
     };
     let manifest_path = config_dir.join("manifest.yaml");

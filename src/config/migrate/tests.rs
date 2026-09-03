@@ -73,6 +73,62 @@ is_release = true
 }
 
 #[test]
+fn migrates_plain_http_sources_with_an_explicit_insecure_opt_in() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("linux");
+    let output = directory.path().join("v5");
+    fs::create_dir(&input).unwrap();
+    fs::write(
+        input.join("tools.toml"),
+        r#"
+[demo]
+folder = "/opt/tools/demo"
+url = "http://example.com/releases"
+update_url = "http://example.com/demo.zip"
+re_version = 'Version (.+)'
+from = "web"
+"#,
+    )
+    .unwrap();
+
+    migrate_directory(&input, &output).unwrap();
+
+    let loaded = config::load(&output.join("manifest.yaml")).unwrap();
+    assert_eq!(loaded.tools.len(), 1);
+    assert!(loaded.allow_insecure_transports);
+    let manifest = fs::read_to_string(output.join("manifest.yaml")).unwrap();
+    assert!(manifest.contains("allow_insecure_transports: true"));
+}
+
+#[test]
+fn migrates_https_sources_without_the_insecure_opt_in() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("linux");
+    let output = directory.path().join("v5");
+    fs::create_dir(&input).unwrap();
+    fs::write(
+        input.join("tools.toml"),
+        r#"
+[demo]
+folder = "/opt/tools/demo"
+url = "https://example.com/releases"
+update_url = "https://example.com/demo.zip"
+re_version = 'Version (.+)'
+from = "web"
+"#,
+    )
+    .unwrap();
+
+    migrate_directory(&input, &output).unwrap();
+
+    let loaded = config::load(&output.join("manifest.yaml")).unwrap();
+    assert_eq!(loaded.tools.len(), 1);
+    assert!(!loaded.allow_insecure_transports);
+    let manifest = fs::read_to_string(output.join("manifest.yaml")).unwrap();
+    assert!(!manifest.contains("allow_insecure_transports"));
+}
+
+#[test]
 fn rejects_non_python_legacy_hooks() {
     let directory = tempdir().unwrap();
     let input = directory.path().join("linux");

@@ -9,7 +9,12 @@ use crate::config::model::{ArtifactConfig, ReleaseConfig};
 use crate::config::validation::validate_placeholders;
 use crate::error::UpdaterError;
 
-pub(super) fn validate(path: &Path, id: &str, release: &ReleaseConfig) -> Result<()> {
+pub(super) fn validate(
+    path: &Path,
+    id: &str,
+    release: &ReleaseConfig,
+    allow_insecure_transports: bool,
+) -> Result<()> {
     match release {
         ReleaseConfig::Github {
             repository,
@@ -38,7 +43,7 @@ pub(super) fn validate(path: &Path, id: &str, release: &ReleaseConfig) -> Result
             version_pattern,
             ignore_versions,
         } => {
-            validate_url(path, id, url)?;
+            validate_url(path, id, url, allow_insecure_transports)?;
             if version_pattern.is_empty() {
                 return Err(UpdaterError::config(
                     path,
@@ -62,7 +67,7 @@ pub(super) fn validate(path: &Path, id: &str, release: &ReleaseConfig) -> Result
             url,
             version_headers,
         } => {
-            validate_url(path, id, url)?;
+            validate_url(path, id, url, allow_insecure_transports)?;
             if version_headers.is_empty() {
                 return Err(UpdaterError::config(
                     path,
@@ -99,6 +104,7 @@ pub(super) fn validate_artifacts(
     id: &str,
     release: &ReleaseConfig,
     artifacts: &[ArtifactConfig],
+    allow_insecure_transports: bool,
 ) -> Result<()> {
     if matches!(release, ReleaseConfig::Manual {}) {
         if !artifacts.is_empty() {
@@ -162,10 +168,12 @@ pub(super) fn validate_artifacts(
                 )?;
                 validate_regex(path, id, "link", pattern)?;
                 if let Some(base_url) = base_url {
-                    validate_url(path, id, base_url)?;
+                    validate_url(path, id, base_url, allow_insecure_transports)?;
                 }
             }
-            ArtifactConfig::DirectUrl { url } => validate_url(path, id, url)?,
+            ArtifactConfig::DirectUrl { url } => {
+                validate_url(path, id, url, allow_insecure_transports)?
+            }
             ArtifactConfig::UrlTemplate { url } => {
                 if !url.contains("{version}") {
                     return Err(UpdaterError::config(
@@ -177,7 +185,12 @@ pub(super) fn validate_artifacts(
                 validate_placeholders(url, &["version"]).map_err(|message| {
                     UpdaterError::config(path, format!("tool {id}: URL template {message}"))
                 })?;
-                validate_url(path, id, &url.replace("{version}", "v1.0.0"))?;
+                validate_url(
+                    path,
+                    id,
+                    &url.replace("{version}", "v1.0.0"),
+                    allow_insecure_transports,
+                )?;
             }
             ArtifactConfig::ReleaseUrl => require_release_type(
                 path,
@@ -236,16 +249,22 @@ fn validate_regex(path: &Path, id: &str, field: &str, pattern: &str) -> Result<(
     Ok(())
 }
 
-fn validate_url(path: &Path, id: &str, value: &str) -> Result<()> {
+fn validate_url(path: &Path, id: &str, value: &str, allow_insecure_transports: bool) -> Result<()> {
     let parsed = url::Url::parse(value).map_err(|error| {
         UpdaterError::config(path, format!("tool {id}: invalid URL {value:?}: {error}"))
     })?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
-        return Err(UpdaterError::config(
-            path,
-            format!("tool {id}: URL {value:?} must use HTTP or HTTPS and include a host"),
-        )
-        .into());
+    let scheme_allowed =
+        parsed.scheme() == "https" || (allow_insecure_transports && parsed.scheme() == "http");
+    if !scheme_allowed || parsed.host_str().is_none() {
+        let message = if allow_insecure_transports {
+            format!("tool {id}: URL {value:?} must use HTTP or HTTPS and include a host")
+        } else {
+            format!(
+                "tool {id}: URL {value:?} must use HTTPS and include a host; \
+                 set allow_insecure_transports: true in the manifest to permit plaintext HTTP sources"
+            )
+        };
+        return Err(UpdaterError::config(path, message).into());
     }
     Ok(())
 }

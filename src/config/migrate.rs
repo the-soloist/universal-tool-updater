@@ -18,7 +18,8 @@ use toml::Value;
 
 use crate::archive::ExtractionLimits;
 use crate::config::model::{
-    DefaultsConfig, ManifestFile, NetworkConfig, PathConfig, SCHEMA_VERSION, ToolFile,
+    ArtifactConfig, DefaultsConfig, ManifestFile, NetworkConfig, PathConfig, ReleaseConfig,
+    SCHEMA_VERSION, ToolConfig, ToolFile,
 };
 
 pub fn migrate_directory(input: &Path, output: &Path) -> Result<()> {
@@ -71,6 +72,15 @@ pub fn migrate_directory(input: &Path, output: &Path) -> Result<()> {
         converted.push((output.join(filename), ToolFile { tools }));
     }
 
+    // 旧配置常含明文 HTTP 源；先扫描再落盘，保证迁移产物始终可以被 config::load 加载。
+    let insecure_tools: Vec<String> = converted
+        .iter()
+        .flat_map(|(_, file)| file.tools.iter())
+        .filter(|(_, tool)| tool_uses_plain_http(tool))
+        .map(|(id, _)| id.clone())
+        .collect();
+    let allow_insecure_transports = !insecure_tools.is_empty();
+
     for (path, file) in converted {
         write_yaml_atomic(&path, &file)?;
     }
@@ -85,15 +95,51 @@ pub fn migrate_directory(input: &Path, output: &Path) -> Result<()> {
         },
         network: NetworkConfig::default(),
         defaults: DefaultsConfig::default(),
+        allow_insecure_transports,
         extraction_limits: ExtractionLimits::default(),
     };
     write_yaml_atomic(&output.join("manifest.yaml"), &manifest)?;
+    if allow_insecure_transports {
+        eprintln!(
+            "warning: legacy tools use plaintext HTTP sources: {}; \
+             the migrated manifest sets allow_insecure_transports: true so it stays loadable; \
+             migrate these tools to HTTPS and remove the flag when possible",
+            insecure_tools.join(", ")
+        );
+    }
     println!(
         "migrated {} configuration files to {}",
         manifest.include.len(),
         output.display()
     );
     Ok(())
+}
+
+fn tool_uses_plain_http(tool: &ToolConfig) -> bool {
+    let release_http = match &tool.release {
+        ReleaseConfig::Web { url, .. } | ReleaseConfig::Http { url, .. } => is_plain_http_url(url),
+        ReleaseConfig::Github { .. } | ReleaseConfig::Manual {} => false,
+    };
+    release_http
+        || tool.artifacts.iter().any(|artifact| match artifact {
+            ArtifactConfig::DirectUrl { url } | ArtifactConfig::UrlTemplate { url } => {
+                is_plain_http_url(url)
+            }
+            ArtifactConfig::PageLink { base_url, .. } => {
+                base_url.as_deref().is_some_and(is_plain_http_url)
+            }
+            ArtifactConfig::GithubAsset { .. }
+            | ArtifactConfig::GithubAssets { .. }
+            | ArtifactConfig::GithubSource { .. }
+            | ArtifactConfig::ReleaseUrl => false,
+        })
+}
+
+/// url-template 含 {version} 占位符无法整体解析，因此按 scheme 前缀判断。
+fn is_plain_http_url(value: &str) -> bool {
+    value
+        .split_once("://")
+        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("http"))
 }
 
 fn legacy_files(input: &Path) -> Result<Vec<PathBuf>> {
