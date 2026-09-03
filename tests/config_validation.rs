@@ -1425,8 +1425,10 @@ fn manifest_file_remains_constructible_with_its_public_fields() {
             staging: None,
             state: PathBuf::from(".updater/state.yaml"),
         },
+        allow_insecure_transports: false,
         network: NetworkConfig::default(),
         defaults: DefaultsConfig::default(),
+        extraction_limits: ExtractionLimits::default(),
     };
     let encoded = yaml_serde::to_string(&manifest).unwrap();
     assert!(encoded.contains("schema_version: 5"));

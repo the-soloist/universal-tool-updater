@@ -18,7 +18,7 @@ use toml::Value;
 
 use crate::archive::ExtractionLimits;
 use crate::config::model::{
-    ArtifactConfig, DefaultsConfig, NetworkConfig, PathConfig, RawManifest, ReleaseConfig,
+    ArtifactConfig, DefaultsConfig, ManifestFile, NetworkConfig, PathConfig, ReleaseConfig,
     SCHEMA_VERSION, ToolConfig, ToolFile,
 };
 
@@ -84,7 +84,7 @@ pub fn migrate_directory(input: &Path, output: &Path) -> Result<()> {
     for (path, file) in converted {
         write_yaml_atomic(&path, &file)?;
     }
-    let manifest = RawManifest {
+    let manifest = ManifestFile {
         schema_version: SCHEMA_VERSION,
         include,
         paths: PathConfig {

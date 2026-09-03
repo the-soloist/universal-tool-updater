@@ -8,7 +8,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use crate::config::AppConfig;
-use crate::config::model::{ManifestFile, RawManifest, SCHEMA_VERSION, ToolFile};
+use crate::config::model::{ManifestFile, SCHEMA_VERSION, ToolFile};
 use crate::config::validation::{validate_manifest_values, validate_tool_config};
 use crate::error::UpdaterError;
 
@@ -18,9 +18,7 @@ use registry::ToolRegistry;
 pub fn load(manifest_path: &Path) -> Result<AppConfig> {
     let app_root = std::env::current_dir().context("cannot determine the working directory")?;
     let manifest_path = resolve_manifest_path(&app_root, manifest_path);
-    let raw: RawManifest = read_yaml(&manifest_path)?;
-    let allow_insecure_transports = raw.allow_insecure_transports;
-    let manifest = ManifestFile::from(raw);
+    let manifest: ManifestFile = read_yaml(&manifest_path)?;
     validate_manifest(&manifest_path, &manifest)?;
     let paths = resolve_paths(&app_root, &manifest_path, &manifest)?;
 
@@ -35,7 +33,13 @@ pub fn load(manifest_path: &Path) -> Result<AppConfig> {
             return Err(UpdaterError::config(&path, "tools must not be empty").into());
         }
         for (id, raw) in tool_file.tools {
-            validate_tool_config(&path, &id, &raw, &app_root, allow_insecure_transports)?;
+            validate_tool_config(
+                &path,
+                &id,
+                &raw,
+                &app_root,
+                manifest.allow_insecure_transports,
+            )?;
             registry.ensure_unique_id(&path, &id)?;
             let tool =
                 tool::materialize(&path, id, profile.clone(), raw, &manifest.defaults, &paths)?;
@@ -48,7 +52,7 @@ pub fn load(manifest_path: &Path) -> Result<AppConfig> {
         app_root,
         paths,
         network: manifest.network,
-        allow_insecure_transports,
+        allow_insecure_transports: manifest.allow_insecure_transports,
         extraction_limits: manifest.extraction_limits,
         tools,
     })

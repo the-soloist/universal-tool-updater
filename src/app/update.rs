@@ -71,7 +71,8 @@ pub(super) fn update_tools(
                 .map(|archive| (tool.id.clone(), archive.clone()))
         })
         .collect::<BTreeMap<_, _>>();
-    let resolver = Resolver::new(&config.network, config.allow_insecure_transports)?;
+    let resolver =
+        Resolver::with_insecure_transports(&config.network, config.allow_insecure_transports)?;
     let downloader = Downloader::new(
         resolver.client().clone(),
         config.extraction_limits.max_total_bytes,

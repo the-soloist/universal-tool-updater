@@ -19,10 +19,18 @@ pub struct Resolver {
 }
 
 impl Resolver {
-    pub fn new(settings: &NetworkConfig, allow_insecure_transports: bool) -> Result<Self> {
+    pub fn new(settings: &NetworkConfig) -> Result<Self> {
+        Self::with_insecure_transports(settings, false)
+    }
+
+    pub fn with_insecure_transports(
+        settings: &NetworkConfig,
+        allow_insecure_transports: bool,
+    ) -> Result<Self> {
         let client = Client::builder()
             .user_agent(&settings.user_agent)
             .timeout(Duration::from_secs(settings.timeout_seconds))
+            .https_only(!allow_insecure_transports)
             .redirect(transport_policy(allow_insecure_transports))
             .build()
             .context("cannot create HTTP client")?;
@@ -111,7 +119,9 @@ fn transport_downgrade<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::transport_downgrade;
+    use crate::domain::NetworkConfig;
+
+    use super::{Resolver, transport_downgrade};
     use url::Url;
 
     fn url(value: &str) -> Url {
@@ -124,6 +134,22 @@ mod tests {
         let next = url("http://mirror.example.com/tool.zip");
         let downgrade = transport_downgrade(&next, &previous, false);
         assert_eq!(downgrade, Some(&url("https://example.com/releases")));
+    }
+
+    #[test]
+    fn secure_client_rejects_direct_http_requests() {
+        let resolver = Resolver::new(&NetworkConfig::default()).unwrap();
+
+        let error = resolver
+            .client()
+            .get("http://127.0.0.1:9/tool.zip")
+            .send()
+            .unwrap_err();
+
+        assert!(
+            error.is_builder(),
+            "expected an HTTPS-only error, got {error}"
+        );
     }
 
     #[test]

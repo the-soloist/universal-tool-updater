@@ -17,23 +17,6 @@ pub struct ManifestFile {
     pub schema_version: u32,
     pub include: Vec<String>,
     pub paths: PathConfig,
-    #[serde(default)]
-    pub network: NetworkConfig,
-    #[serde(default)]
-    pub defaults: DefaultsConfig,
-    /// 解压与下载的累计配额；省略时使用默认值 8 GiB / 100000 条目。
-    #[serde(default, skip_serializing_if = "ExtractionLimits::is_default")]
-    pub extraction_limits: ExtractionLimits,
-}
-
-/// 私有 YAML 模型：在反序列化边界承载 `allow_insecure_transports`，
-/// 避免为新增配置扩展公开可构造的 `ManifestFile` 字段集（0.2.x 兼容线）。
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawManifest {
-    pub schema_version: u32,
-    pub include: Vec<String>,
-    pub paths: PathConfig,
     /// Permits plain-HTTP download URLs; HTTPS remains the only default.
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_insecure_transports: bool,
@@ -44,19 +27,6 @@ pub(crate) struct RawManifest {
     /// 解压与下载的累计配额；省略时使用默认值 8 GiB / 100000 条目。
     #[serde(default, skip_serializing_if = "ExtractionLimits::is_default")]
     pub extraction_limits: ExtractionLimits,
-}
-
-impl From<RawManifest> for ManifestFile {
-    fn from(raw: RawManifest) -> Self {
-        Self {
-            schema_version: raw.schema_version,
-            include: raw.include,
-            paths: raw.paths,
-            network: raw.network,
-            defaults: raw.defaults,
-            extraction_limits: raw.extraction_limits,
-        }
-    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -187,7 +157,7 @@ pub struct SymlinkConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{ManifestFile, RawManifest};
+    use super::ManifestFile;
 
     const MINIMAL: &str = "
 schema_version: 5
@@ -197,37 +167,25 @@ paths:
 ";
 
     #[test]
-    fn raw_manifest_defaults_the_transport_flag_to_false_and_omits_it() {
-        let raw: RawManifest = yaml_serde::from_str(MINIMAL).unwrap();
-        assert!(!raw.allow_insecure_transports);
-        assert!(
-            !yaml_serde::to_string(&raw)
-                .unwrap()
-                .contains("allow_insecure_transports")
-        );
-    }
-
-    #[test]
-    fn raw_manifest_round_trips_an_explicit_transport_opt_in() {
-        let raw: RawManifest =
-            yaml_serde::from_str(&format!("{MINIMAL}allow_insecure_transports: true\n")).unwrap();
-        assert!(raw.allow_insecure_transports);
-        assert!(
-            yaml_serde::to_string(&raw)
-                .unwrap()
-                .contains("allow_insecure_transports: true")
-        );
-    }
-
-    #[test]
-    fn manifest_file_strips_the_transport_flag_when_converted() {
-        let raw: RawManifest =
-            yaml_serde::from_str(&format!("{MINIMAL}allow_insecure_transports: true\n")).unwrap();
-        let manifest = ManifestFile::from(raw);
+    fn manifest_defaults_the_transport_flag_to_false_and_omits_it() {
+        let manifest: ManifestFile = yaml_serde::from_str(MINIMAL).unwrap();
+        assert!(!manifest.allow_insecure_transports);
         assert!(
             !yaml_serde::to_string(&manifest)
                 .unwrap()
                 .contains("allow_insecure_transports")
+        );
+    }
+
+    #[test]
+    fn manifest_round_trips_an_explicit_transport_opt_in() {
+        let manifest: ManifestFile =
+            yaml_serde::from_str(&format!("{MINIMAL}allow_insecure_transports: true\n")).unwrap();
+        assert!(manifest.allow_insecure_transports);
+        assert!(
+            yaml_serde::to_string(&manifest)
+                .unwrap()
+                .contains("allow_insecure_transports: true")
         );
     }
 }
