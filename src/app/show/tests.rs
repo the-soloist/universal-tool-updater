@@ -64,6 +64,7 @@ fn config() -> AppConfig {
             state: PathBuf::from("/toolkit/.updater/state.yaml"),
         },
         network: NetworkConfig::default(),
+        allow_insecure_transports: false,
         tools,
     }
 }

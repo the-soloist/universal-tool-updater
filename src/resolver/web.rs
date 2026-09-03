@@ -15,6 +15,7 @@ pub(super) fn resolve(
     page_url: &str,
     version_pattern: &str,
     ignored: &[String],
+    allow_insecure_transports: bool,
 ) -> Result<ResolvedRelease> {
     let response = client
         .get(page_url)
@@ -102,7 +103,7 @@ pub(super) fn resolve(
             filename_from_url(&resolved_url)
         };
         if matches!(artifact, ArtifactConfig::PageLink { .. }) {
-            validate_scraped_url(tool, &resolved_url)?;
+            validate_scraped_url(tool, &resolved_url, allow_insecure_transports)?;
         }
         artifacts.push(ResolvedArtifact {
             filename,
@@ -116,16 +117,29 @@ fn normalize_page_link(value: &str) -> String {
     value.replace("\\/", "/").replace("&amp;", "&")
 }
 
-fn validate_scraped_url(tool: &Tool, value: &str) -> std::result::Result<(), UpdaterError> {
+/// 运行时对页面抓取 URL 的复验，镜像配置期规则：默认仅 HTTPS，
+/// opt-in 后允许明文 HTTP，且必须带主机名。
+fn validate_scraped_url(
+    tool: &Tool,
+    value: &str,
+    allow_insecure_transports: bool,
+) -> std::result::Result<(), UpdaterError> {
     let rejected = |reason: String| UpdaterError::Resolution {
         tool: tool.id.clone(),
         message: format!("scraped download URL {value:?} rejected: {reason}"),
     };
     let parsed = Url::parse(value).map_err(|error| rejected(format!("invalid URL: {error}")))?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
-        return Err(rejected(
-            "URL must use HTTP or HTTPS and include a host".to_owned(),
-        ));
+    let scheme_allowed =
+        parsed.scheme() == "https" || (allow_insecure_transports && parsed.scheme() == "http");
+    if !scheme_allowed || parsed.host_str().is_none_or(str::is_empty) {
+        let allowed = if allow_insecure_transports {
+            "HTTP or HTTPS"
+        } else {
+            "HTTPS"
+        };
+        return Err(rejected(format!(
+            "URL must use {allowed} and include a host"
+        )));
     }
     Ok(())
 }
@@ -147,14 +161,38 @@ mod tests {
     }
 
     #[test]
-    fn accepts_only_http_page_links_with_a_host() {
+    fn rejects_scraped_page_links_that_are_not_https() {
         let tool = test_tool("demo", "/toolkit/demo");
 
-        assert!(validate_scraped_url(&tool, "https://example.com/tool.zip").is_ok());
-        assert!(validate_scraped_url(&tool, "http://example.com/tool.zip").is_ok());
+        let error = validate_scraped_url(&tool, "http://example.com/tool.zip", false).unwrap_err();
+        assert!(
+            error.to_string().contains("http://example.com/tool.zip"),
+            "expected the rejected URL in the error, got {error}"
+        );
+        assert!(
+            error.to_string().contains("HTTPS"),
+            "expected the scheme reason, got {error}"
+        );
+    }
+
+    #[test]
+    fn allows_plain_http_scraped_page_links_only_when_opted_in() {
+        let tool = test_tool("demo", "/toolkit/demo");
+
+        assert!(validate_scraped_url(&tool, "http://example.com/tool.zip", true).is_ok());
+        assert!(validate_scraped_url(&tool, "https://example.com/tool.zip", false).is_ok());
+    }
+
+    #[test]
+    fn rejects_scraped_page_links_without_a_host() {
+        let tool = test_tool("demo", "/toolkit/demo");
+
         for value in ["file:///tmp/tool.zip", "javascript:alert(1)"] {
-            let error = validate_scraped_url(&tool, value).unwrap_err();
-            assert!(error.to_string().contains("include a host"));
+            let error = validate_scraped_url(&tool, value, false).unwrap_err();
+            assert!(
+                error.to_string().contains("include a host"),
+                "expected a host rejection for {value}, got {error}"
+            );
         }
     }
 }
