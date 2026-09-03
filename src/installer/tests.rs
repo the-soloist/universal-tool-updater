@@ -73,7 +73,7 @@ fn keeps_github_copy_artifacts_uncompressed_and_records_release_version() {
     fs::create_dir_all(&destination).unwrap();
     fs::write(destination.parent().unwrap().join(".version"), "v1\n").unwrap();
 
-    let archive_service = ArchiveService;
+    let archive_service = ArchiveService::default();
     archive_service
         .compress_7z(&old_content, &destination.join("Demo-v1.7z"))
         .unwrap();
@@ -178,7 +178,7 @@ fn rebuilds_an_unchecked_corrupt_merge_archive() {
     let artifact = downloads.join("demo.7z");
     fs::create_dir(&payload).unwrap();
     fs::write(payload.join("new.bin"), "new").unwrap();
-    let archive_service = ArchiveService;
+    let archive_service = ArchiveService::default();
     archive_service.compress_7z(&payload, &artifact).unwrap();
 
     let mut tool = test_tool("demo", destination.clone());
@@ -226,7 +226,7 @@ fn directory_output_records_version_inside_destination() {
     fs::create_dir(&payload).unwrap();
     fs::write(payload.join("demo.bin"), "demo").unwrap();
     let artifact = downloads.join("demo.7z");
-    let archive_service = ArchiveService;
+    let archive_service = ArchiveService::default();
     archive_service.compress_7z(&payload, &artifact).unwrap();
 
     let mut tool = test_tool("demo", destination.clone());
@@ -302,7 +302,7 @@ fn restores_previous_installation_when_post_install_hook_fails() {
         }],
         ..HookConfig::default()
     };
-    let archive_service = ArchiveService;
+    let archive_service = ArchiveService::default();
     let hook_runner = HookRunner;
     let installer = Installer::new(&archive_service, &hook_runner, directory.path(), &toolkit);
     let run = RunWorkspace::create(&downloads, &downloads.join("staging")).unwrap();
@@ -377,7 +377,7 @@ fn rejects_links_that_escape_after_single_root_promotion() {
         url: "https://example.com/demo.tar.gz".to_owned(),
     }];
     tool.install.allow_symlinks_in_archive = true;
-    let archive_service = ArchiveService;
+    let archive_service = ArchiveService::default();
     let hook_runner = HookRunner;
     let installer = Installer::new(&archive_service, &hook_runner, directory.path(), &toolkit);
     let run = RunWorkspace::create(&downloads, &downloads.join("staging")).unwrap();
@@ -430,7 +430,7 @@ fn accepts_promoted_links_that_stay_within_the_installation() {
         url: "https://example.com/demo.tar.gz".to_owned(),
     }];
     tool.install.allow_symlinks_in_archive = true;
-    let archive_service = ArchiveService;
+    let archive_service = ArchiveService::default();
     let hook_runner = HookRunner;
     let installer = Installer::new(&archive_service, &hook_runner, directory.path(), &toolkit);
     let run = RunWorkspace::create(&downloads, &downloads.join("staging")).unwrap();

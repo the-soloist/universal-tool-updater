@@ -8,22 +8,54 @@ use std::io;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use sevenz_rust::encoder_options::Lzma2Options;
 use sevenz_rust::{ArchiveEntry, ArchiveReader, ArchiveWriter, Password};
 use walkdir::WalkDir;
 
 use crate::error::UpdaterError;
 
-/// 单次解压贯穿的工具归属与链接策略。
+/// 解压与下载共享的累计配额，防止压缩炸弹和磁盘耗尽。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExtractionLimits {
+    pub max_total_bytes: u64,
+    pub max_entries: usize,
+}
+
+impl Default for ExtractionLimits {
+    fn default() -> Self {
+        Self {
+            max_total_bytes: 8 * 1024 * 1024 * 1024,
+            max_entries: 100_000,
+        }
+    }
+}
+
+impl ExtractionLimits {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// 单次解压贯穿的工具归属、链接策略与配额上下文。
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ExtractionContext<'a> {
     pub(crate) tool_id: Option<&'a str>,
     pub(crate) allow_symlinks: bool,
+    pub(crate) limits: ExtractionLimits,
 }
 
-pub struct ArchiveService;
+#[derive(Default)]
+pub struct ArchiveService {
+    limits: ExtractionLimits,
+}
 
 impl ArchiveService {
+    pub fn with_limits(limits: ExtractionLimits) -> Self {
+        Self { limits }
+    }
+
     pub fn extract(
         &self,
         archive: &Path,
@@ -34,7 +66,7 @@ impl ArchiveService {
     }
 
     /// 工具作用域解压：链接条目的拒绝错误会带上工具 ID，
-    /// 含链接的归档仅在工具显式开启 opt-in 时放行。
+    /// 含链接的归档仅在工具显式开启 opt-in 时放行；配额违规也会带上工具 ID。
     pub(crate) fn extract_for_tool(
         &self,
         tool_id: &str,
@@ -63,6 +95,7 @@ impl ArchiveService {
         let context = ExtractionContext {
             tool_id,
             allow_symlinks,
+            limits: self.limits,
         };
         fs::create_dir_all(destination).with_context(|| {
             format!(
@@ -76,14 +109,14 @@ impl ArchiveService {
         })?;
 
         match kind {
-            ArchiveKind::Zip => extract::zip(archive, destination, password),
-            ArchiveKind::SevenZip => extract::seven_zip(archive, destination, password),
+            ArchiveKind::Zip => extract::zip(archive, destination, password, &context),
+            ArchiveKind::SevenZip => extract::seven_zip(archive, destination, password, &context),
             ArchiveKind::Rar => extract::rar(archive, destination, password, &context),
             ArchiveKind::TarGz => extract::tar_gzip(archive, destination, &context),
             ArchiveKind::TarBz2 => extract::tar_bzip2(archive, destination, &context),
             ArchiveKind::TarXz => extract::tar_xz(archive, destination, &context),
-            ArchiveKind::Gzip => extract::gzip(archive, destination),
-            ArchiveKind::Xz => extract::xz(archive, destination),
+            ArchiveKind::Gzip => extract::gzip(archive, destination, &context),
+            ArchiveKind::Xz => extract::xz(archive, destination, &context),
         }
     }
 

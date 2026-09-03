@@ -114,7 +114,7 @@ mod tests {
         let unpacked = directory.path().join("unpacked");
         fs::create_dir(&unpacked).unwrap();
         let tool = test_tool("nested", directory.path().join("destination"));
-        let prepared = ArtifactPreparer::new(&ArchiveService, &unpacked)
+        let prepared = ArtifactPreparer::new(&ArchiveService::default(), &unpacked)
             .prepare(&tool, &DownloadedArtifact { path: outer }, 0)
             .unwrap();
 

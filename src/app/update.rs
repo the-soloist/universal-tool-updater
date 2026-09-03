@@ -72,7 +72,10 @@ pub(super) fn update_tools(
         })
         .collect::<BTreeMap<_, _>>();
     let resolver = Resolver::new(&config.network)?;
-    let downloader = Downloader::new(resolver.client().clone());
+    let downloader = Downloader::new(
+        resolver.client().clone(),
+        config.extraction_limits.max_total_bytes,
+    );
     let workspace = if options.dry_run {
         None
     } else {
@@ -81,7 +84,7 @@ pub(super) fn update_tools(
             &config.paths.staging,
         )?)
     };
-    let archive = ArchiveService;
+    let archive = ArchiveService::with_limits(config.extraction_limits);
     let hooks = HookRunner;
     let installer = Installer::new(
         &archive,

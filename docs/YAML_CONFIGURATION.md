@@ -76,6 +76,7 @@ defaults:
 | `paths` | 是 | 全局路径配置。 |
 | `network` | 否 | 网络和并发配置；省略时使用默认值。 |
 | `defaults` | 否 | 工具安装默认值；工具自身的同名字段优先。 |
+| `extraction_limits` | 否 | 解压与下载配额；省略时使用默认值（见 2.5）。 |
 
 ### 2.2 paths
 
@@ -114,6 +115,15 @@ defaults:
 | `install.archive_name` | `{name} - {version}.7z` | `save: archive` 的输出文件名模板。 |
 
 `archive_name` 只能是文件名，不能包含目录；支持 `{id}`、`{name}`、`{version}` 三个占位符。最终保存为压缩包时扩展名必须为 `.7z`。
+
+### 2.5 extraction_limits
+
+| 字段 | 类型 | 默认值 | 约束 |
+| --- | --- | --- | --- |
+| `max_total_bytes` | integer | `8589934592`（8 GiB） | 必须大于 `0`。 |
+| `max_entries` | integer | `100000` | 必须大于 `0`。 |
+
+解压 zip/tar/7z/rar 时逐条目累计未压缩大小和条目数量，超过任一上限即在写入前拒绝；同时统计实际写出的字节数，归档头谎报大小时也会在写入中途中断。gz/xz 单文件解压按同一 `max_total_bytes` 计数。下载侧对 `Content-Length`（或续传的完整大小）执行同一 `max_total_bytes` 检查，超限直接报错。整个节点可省略，两个子字段也均可省略（分别取默认值）。
 
 ## 3. Profile 与工具字典
 

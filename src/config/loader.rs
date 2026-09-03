@@ -46,6 +46,7 @@ pub fn load(manifest_path: &Path) -> Result<AppConfig> {
         app_root,
         paths,
         network: manifest.network,
+        extraction_limits: manifest.extraction_limits,
         tools,
     })
 }
