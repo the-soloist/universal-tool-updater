@@ -280,6 +280,151 @@ fn recovers_a_completed_artifact_from_an_interrupted_run() {
 }
 
 #[test]
+fn discards_an_oversized_cached_partial_under_a_tighter_limit() {
+    let body = b"hello world";
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/artifact.bin", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let size = stream.read(&mut request).unwrap();
+        let request = String::from_utf8_lossy(&request[..size]).to_ascii_lowercase();
+        // 旧上限时代留下的完整缓存超过新上限时必须整体丢弃，从零重新请求。
+        assert!(!request.contains("range:"));
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: 11\r\nETag: \"resume-v1\"\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        stream.write_all(body).unwrap();
+    });
+
+    let fixture = DownloadFixture::new();
+    fixture.cache(&url, body, Some(body.len() as u64), "\"resume-v1\"");
+    let error = fixture.download_result_with_limit(&url, 8).unwrap_err();
+    server.join().unwrap();
+
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("exceeding the download limit of 8 bytes"),
+        "expected the byte-ceiling failure, got {message}"
+    );
+    fixture.assert_partials_empty();
+}
+
+#[test]
+fn does_not_finalize_an_oversized_complete_cache_on_a_416_response() {
+    let body = b"hello world";
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/artifact.bin", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let size = stream.read(&mut request).unwrap();
+        let request = String::from_utf8_lossy(&request[..size]).to_ascii_lowercase();
+        if request.contains("range:") {
+            // 服务器宣称缓存已完整：旧代码在 416 完成分支直接 finalize，
+            // 绕过更小的下载上限。
+            write!(
+                stream,
+                "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */11\r\nETag: \"resume-v1\"\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+        } else {
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: 11\r\nETag: \"resume-v1\"\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+        }
+    });
+
+    let fixture = DownloadFixture::new();
+    fixture.cache(&url, body, Some(body.len() as u64), "\"resume-v1\"");
+    let error = fixture.download_result_with_limit(&url, 8).unwrap_err();
+    server.join().unwrap();
+
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("exceeding the download limit of 8 bytes"),
+        "expected the byte-ceiling failure, got {message}"
+    );
+    fixture.assert_partials_empty();
+}
+
+#[test]
+fn does_not_recover_an_oversized_previous_download() {
+    let body = b"hello world";
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!(
+        "http://{}/artifact-1.0.0.bin",
+        listener.local_addr().unwrap()
+    );
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let size = stream.read(&mut request).unwrap();
+        let request = String::from_utf8_lossy(&request[..size]).to_ascii_lowercase();
+        // 超过新上限的旧产物不得恢复续传，必须从零请求并在传输路径上重新校验。
+        assert!(!request.contains("range:"));
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        stream.write_all(body).unwrap();
+    });
+
+    let root = tempdir().unwrap();
+    let staging = root.path().join("staging");
+    let tool = resume_tool();
+    let previous_run = RunWorkspace::create(root.path(), &staging).unwrap();
+    let previous = previous_run.prepare(&tool).unwrap();
+    let previous_file = previous.downloads().join("artifact-1.0.0.bin");
+    fs::write(&previous_file, body).unwrap();
+
+    let current_run = RunWorkspace::create(root.path(), &staging).unwrap();
+    let current = current_run.prepare(&tool).unwrap();
+    let client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let progress = ProgressManager::new(false, 1);
+    let task_progress = progress.task("test", "Resume");
+    let error = Downloader::new(client, 8)
+        .download(
+            &tool,
+            "1.0.0",
+            &ResolvedArtifact {
+                url: url.clone(),
+                filename: Some("artifact-1.0.0.bin".to_owned()),
+            },
+            &current,
+            (0, 1),
+            &task_progress,
+        )
+        .unwrap_err();
+    server.join().unwrap();
+
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("exceeding the download limit of 8 bytes"),
+        "expected the byte-ceiling failure, got {message}"
+    );
+    // 恢复被跳过：旧产物原样保留，partials 中没有复制出的超限缓存。
+    assert_eq!(fs::read(&previous_file).unwrap(), body);
+    let (partial, _metadata) = partial_paths(current.partials(), &url);
+    assert!(
+        fs::metadata(&partial)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0)
+            == 0,
+        "the oversized previous download must not be copied into the partial cache"
+    );
+}
+
+#[test]
 fn does_not_recover_an_unversioned_artifact_from_an_old_run() {
     let current_body = b"current";
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -528,13 +673,21 @@ impl DownloadFixture {
     }
 
     fn download_result(&self, url: &str) -> Result<DownloadedArtifact, anyhow::Error> {
+        self.download_result_with_limit(url, ExtractionLimits::default().max_total_bytes)
+    }
+
+    fn download_result_with_limit(
+        &self,
+        url: &str,
+        max_download_bytes: u64,
+    ) -> Result<DownloadedArtifact, anyhow::Error> {
         let client = Client::builder()
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
         let progress = ProgressManager::new(false, 1);
         let task_progress = progress.task("test", "Resume");
-        Downloader::new(client, ExtractionLimits::default().max_total_bytes).download(
+        Downloader::new(client, max_download_bytes).download(
             &self.tool,
             "1.0.0",
             &ResolvedArtifact {
