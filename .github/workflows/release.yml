@@ -36,7 +36,7 @@ jobs:
         include:
           - arch: x86_64
             target: x86_64-unknown-linux-musl
-            platform: linux
+            platform: linux-x86_64
             use_zig: false
           - arch: arm64
             target: aarch64-unknown-linux-musl
@@ -91,7 +91,7 @@ jobs:
         include:
           - arch: x86_64
             target: x86_64-pc-windows-msvc
-            platform: windows
+            platform: windows-x86_64
           - arch: arm64
             target: aarch64-pc-windows-msvc
             platform: windows-arm64

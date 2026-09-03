@@ -177,9 +177,9 @@ pub fn cleanup_helper(work_dir: &Path) -> Result<()> {
 
 fn asset_platform(os: &str, arch: &str) -> Result<&'static str> {
     match (os, arch) {
-        ("windows", "x86_64") => Ok("windows"),
+        ("windows", "x86_64") => Ok("windows-x86_64"),
         ("windows", "aarch64") => Ok("windows-arm64"),
-        ("linux", "x86_64") => Ok("linux"),
+        ("linux", "x86_64") => Ok("linux-x86_64"),
         ("linux", "aarch64") => Ok("linux-arm64"),
         ("macos", "x86_64") => Ok("macos-x86_64"),
         ("macos", "aarch64") => Ok("macos-arm64"),

@@ -8,9 +8,12 @@ use super::lock::{LOCK_FILENAME, UpdateLock};
 
 #[test]
 fn maps_only_published_platforms() {
-    assert_eq!(asset_platform("linux", "x86_64").unwrap(), "linux");
+    assert_eq!(asset_platform("linux", "x86_64").unwrap(), "linux-x86_64");
     assert_eq!(asset_platform("linux", "aarch64").unwrap(), "linux-arm64");
-    assert_eq!(asset_platform("windows", "x86_64").unwrap(), "windows");
+    assert_eq!(
+        asset_platform("windows", "x86_64").unwrap(),
+        "windows-x86_64"
+    );
     assert_eq!(
         asset_platform("windows", "aarch64").unwrap(),
         "windows-arm64"

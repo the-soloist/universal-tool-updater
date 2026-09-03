@@ -24,6 +24,8 @@
 
 从 [GitHub Releases](https://github.com/the-soloist/universal-tool-updater/releases/latest) 下载对应平台的压缩包，或从源码构建：
 
+发布资产统一命名为 `updater-<版本>-<系统>-<架构>.7z`，架构使用 `x86_64` 或 `arm64`。
+
 ```bash
 ./build.sh
 ```

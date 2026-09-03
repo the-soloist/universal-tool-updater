@@ -112,13 +112,13 @@ mod tests {
             tag: "v1.2.3".to_owned(),
             version: Version::new(1, 2, 3),
             assets: vec![Asset {
-                name: "updater-v1.2.3-linux.7z".to_owned(),
-                browser_download_url: "https://github.com/the-soloist/universal-tool-updater/releases/download/v1.2.3/updater-v1.2.3-linux.7z".to_owned(),
+                name: "updater-v1.2.3-linux-x86_64.7z".to_owned(),
+                browser_download_url: "https://github.com/the-soloist/universal-tool-updater/releases/download/v1.2.3/updater-v1.2.3-linux-x86_64.7z".to_owned(),
             }],
         };
         assert_eq!(
-            release.asset_url("updater-v1.2.3-linux.7z").unwrap(),
-            "https://github.com/the-soloist/universal-tool-updater/releases/download/v1.2.3/updater-v1.2.3-linux.7z"
+            release.asset_url("updater-v1.2.3-linux-x86_64.7z").unwrap(),
+            "https://github.com/the-soloist/universal-tool-updater/releases/download/v1.2.3/updater-v1.2.3-linux-x86_64.7z"
         );
         assert!(release.asset_url("updater-v1.2.3-macos-arm64.7z").is_err());
     }
