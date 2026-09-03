@@ -593,7 +593,8 @@ fn ensure_link_is_allowed<R: io::Read>(
 }
 
 /// 链接目标必须是相对路径，且与条目位置拼接后仍位于解压目录内。
-fn ensure_bounded_link_target(
+/// 供 tar/RAR 解压校验与安装侧的最终目录复验共用。
+pub(crate) fn ensure_bounded_link_target(
     archive_path: &Path,
     destination: &Path,
     destination_root: &Path,

@@ -1,4 +1,4 @@
-mod extract;
+pub(crate) mod extract;
 #[cfg(test)]
 mod tests;
 
