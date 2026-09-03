@@ -108,6 +108,10 @@ impl Quota {
             .saturating_sub(self.actual_bytes)
     }
 
+    fn tool_prefix(&self) -> &str {
+        &self.tool_prefix
+    }
+
     fn actual_violation(&self, archive: &Path) -> UpdaterError {
         archive_error(
             archive,
@@ -175,6 +179,8 @@ struct CountingReader<'a> {
     remaining: u64,
     counted: u64,
     tripped: bool,
+    /// 配额耗尽后探测读出的字节，等下一次 read 归还，避免丢弃数据。
+    pending: Option<u8>,
 }
 
 impl<'a> CountingReader<'a> {
@@ -184,6 +190,7 @@ impl<'a> CountingReader<'a> {
             remaining,
             counted: 0,
             tripped: false,
+            pending: None,
         }
     }
 
@@ -201,7 +208,20 @@ impl Read for CountingReader<'_> {
         if buffer.is_empty() {
             return Ok(0);
         }
+        if let Some(byte) = self.pending.take() {
+            buffer[0] = byte;
+            return Ok(1);
+        }
         if self.remaining == 0 {
+            // 累计输出恰好等于配额是合法归档：后端会再读一次确认 EOF，
+            // 此处先对底层做单字节探测，真 EOF 返回 Ok(0)，读到数据才判超额。
+            let mut probe = [0_u8; 1];
+            let probed = self.inner.read(&mut probe)?;
+            if probed == 0 {
+                return Ok(0);
+            }
+            self.counted += probed as u64;
+            self.pending = Some(probe[0]);
             self.tripped = true;
             return Err(io::Error::other("extraction output quota exceeded"));
         }
@@ -531,6 +551,9 @@ pub(super) fn rar(
         restore_owners: false,
     };
     let mut quota = Quota::new(context);
+    // 库级输出上限在每个成员解压前压到剩余配额：未声明大小或声明不可信的
+    // 成员会在写盘中途被库拦截，落盘后的 charge_actual 仅作复核。
+    let mut rar_limits = unrar_rs::Limits::default();
 
     for member in reader.indexed_member_infos() {
         if !member.extractable {
@@ -558,12 +581,23 @@ pub(super) fn rar(
         if let Some(parent) = output.parent() {
             fs::create_dir_all(parent)?;
         }
+        rar_limits.max_unpacked_size = quota.remaining_actual();
+        reader.set_limits(rar_limits.clone());
         let written = reader
             .extract_member_to_file(member.index, &options, None, &output)
             .map_err(|error| {
+                // 库侧 ResourceLimit 拦截就是配额违规，与其他配额错误一样带工具归属。
+                let tool_prefix = if matches!(error, unrar_rs::RarError::ResourceLimit { .. }) {
+                    quota.tool_prefix()
+                } else {
+                    ""
+                };
                 archive_error(
                     archive,
-                    format!("RAR extraction failed for {:?}: {error}", member.info.name),
+                    format!(
+                        "{tool_prefix}RAR extraction failed for {:?}: {error}",
+                        member.info.name
+                    ),
                 )
             })?;
         quota.charge_actual(archive, written)?;
@@ -741,7 +775,7 @@ fn safe_rar_member_path(value: &str) -> Option<&Path> {
 mod tests {
     use std::io::{self, Read, Write};
 
-    use super::{IO_BUFFER_BYTES, copy_buffered};
+    use super::{CountingReader, IO_BUFFER_BYTES, copy_buffered};
 
     #[derive(Default)]
     struct CountingWriter {
@@ -787,5 +821,53 @@ mod tests {
         assert_eq!(copied, payload.len() as u64);
         assert_eq!(output.bytes, payload.len());
         assert_eq!(output.calls, 3);
+    }
+
+    #[test]
+    fn counting_reader_accepts_output_equal_to_the_quota() {
+        let payload = vec![1_u8; 4];
+        let mut underlying = ChunkedReader {
+            remaining: &payload,
+        };
+        let mut limited = CountingReader::new(&mut underlying, 4);
+
+        let copied = io::copy(&mut limited, &mut io::sink()).unwrap();
+
+        assert_eq!(copied, 4);
+        assert_eq!(limited.counted(), 4);
+        assert!(!limited.tripped());
+    }
+
+    #[test]
+    fn counting_reader_trips_after_the_quota_when_more_data_remains() {
+        let payload = vec![1_u8; 5];
+        let mut underlying = ChunkedReader {
+            remaining: &payload,
+        };
+        let mut limited = CountingReader::new(&mut underlying, 4);
+
+        let error = io::copy(&mut limited, &mut io::sink()).unwrap_err();
+
+        assert_eq!(error.to_string(), "extraction output quota exceeded");
+        assert_eq!(limited.counted(), 5);
+        assert!(limited.tripped());
+    }
+
+    #[test]
+    fn counting_reader_returns_the_probed_byte_on_the_next_read() {
+        let payload = vec![7_u8; 5];
+        let mut underlying = ChunkedReader {
+            remaining: &payload,
+        };
+        let mut limited = CountingReader::new(&mut underlying, 4);
+
+        let mut buffer = [0_u8; 4];
+        assert_eq!(limited.read(&mut buffer).unwrap(), 4);
+        assert!(limited.read(&mut buffer).is_err());
+
+        // 探测读出的字节不能丢弃：错误之后如果后端仍读取，须原样归还。
+        let mut recovered = [0_u8; 1];
+        assert_eq!(limited.read(&mut recovered).unwrap(), 1);
+        assert_eq!(recovered[0], 7);
     }
 }

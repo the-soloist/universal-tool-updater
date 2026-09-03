@@ -375,6 +375,79 @@ fn interrupts_zip_entries_whose_real_output_exceeds_the_quota() {
     );
 }
 
+#[test]
+fn interrupts_rar_members_with_unknown_size_at_the_quota() {
+    let directory = tempdir().unwrap();
+    let archive_path = directory.path().join("unknown.rar");
+    let output_path = directory.path().join("output");
+    // 未声明 unpacked size 的成员在声明通道计 0 字节，配额前置检查
+    // 依赖库级 max_unpacked_size 在写盘中途拦截，而非等完整落盘后复核。
+    let payload = vec![0_u8; 64 * 1024];
+    fs::write(
+        &archive_path,
+        stored_rar5_unknown_size("tool.txt", &payload),
+    )
+    .unwrap();
+
+    let service = ArchiveService::with_limits(ExtractionLimits {
+        max_total_bytes: 16 * 1024,
+        max_entries: 100,
+    });
+    let error = service
+        .extract_for_tool("demo", &archive_path, &output_path, None)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("tool demo"),
+        "expected tool attribution, got {error:#}"
+    );
+    assert!(
+        error.to_string().contains("16384"),
+        "expected the library-level output limit, got {error:#}"
+    );
+    let written = fs::metadata(output_path.join("tool.txt"))
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    assert!(
+        written <= 16 * 1024,
+        "the interrupted member wrote {written} bytes past the quota"
+    );
+}
+
+#[test]
+fn extracts_a_7z_archive_whose_output_equals_the_quota() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("source");
+    let archive = directory.path().join("source.7z");
+    let output = directory.path().join("output");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("tool.txt"), "0123456789").unwrap();
+    ArchiveService::default()
+        .compress_7z(&source, &archive)
+        .unwrap();
+
+    // 累计输出恰好等于配额是合法归档：读取侧守卫在配额耗尽后
+    // 仍要确认底层 EOF，不能把等额输出误判为超额。
+    let exact = ArchiveService::with_limits(ExtractionLimits {
+        max_total_bytes: 10,
+        max_entries: 100,
+    });
+    exact.extract(&archive, &output, None).unwrap();
+    assert_eq!(
+        fs::read_to_string(output.join("tool.txt")).unwrap(),
+        "0123456789"
+    );
+
+    let below = ArchiveService::with_limits(ExtractionLimits {
+        max_total_bytes: 9,
+        max_entries: 100,
+    });
+    let output_below = directory.path().join("output-below");
+    assert!(
+        below.extract(&archive, &output_below, None).is_err(),
+        "an archive one byte over the quota must fail"
+    );
+}
+
 /// 构造本地头与中央头都声明（谎报的）解压大小、
 /// 但携带更大 Deflate 载荷的 stored ZIP。
 fn build_lying_deflate_zip(name: &str, compressed: &[u8], crc: u32, declared_size: u32) -> Vec<u8> {
@@ -470,11 +543,22 @@ fn xz(contents: &[u8]) -> Vec<u8> {
 }
 
 fn stored_rar5(filename: &str, content: &[u8]) -> Vec<u8> {
+    stored_rar5_with_flags(filename, content, 0x0004)
+}
+
+/// 构造 unpacked size 未声明的 stored RAR5 成员：file flags 置
+/// UNPACKED_SIZE_UNKNOWN（0x0008）后解析器忽略 size 字段，
+/// 声明通道对其计 0 字节，只有输出侧限制能在写盘中途拦截。
+fn stored_rar5_unknown_size(filename: &str, content: &[u8]) -> Vec<u8> {
+    stored_rar5_with_flags(filename, content, 0x0004 | 0x0008)
+}
+
+fn stored_rar5_with_flags(filename: &str, content: &[u8], file_flags: u64) -> Vec<u8> {
     let mut archive = b"Rar!\x1a\x07\x01\x00".to_vec();
     archive.extend_from_slice(&rar5_header(1, 0, &encode_vint(0)));
 
     let mut file_body = Vec::new();
-    file_body.extend_from_slice(&encode_vint(0x0004));
+    file_body.extend_from_slice(&encode_vint(file_flags));
     file_body.extend_from_slice(&encode_vint(content.len() as u64));
     file_body.extend_from_slice(&encode_vint(0o644));
     file_body.extend_from_slice(&(crc_fast::crc32_iso_hdlc(content) as u32).to_le_bytes());
