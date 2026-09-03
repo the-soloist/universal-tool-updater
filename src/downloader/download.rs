@@ -27,7 +27,6 @@ use super::partial::{
 use super::recovery::recover_previous_download;
 
 const HASH_CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024;
-const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_RESTARTS: usize = 3;
 
 pub struct Downloader {
@@ -36,15 +35,9 @@ pub struct Downloader {
 }
 
 impl Downloader {
-    pub fn new(client: Client) -> Self {
-        Self {
-            client,
-            max_download_bytes: DEFAULT_MAX_DOWNLOAD_BYTES,
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn with_max_download_bytes(client: Client, max_download_bytes: u64) -> Self {
+    /// 下载上限与解压配额的 `extraction_limits.max_total_bytes` 联动：
+    /// 声明的 Content-Length（或续传完整大小）超限即在传输前拒绝。
+    pub fn new(client: Client, max_download_bytes: u64) -> Self {
         Self {
             client,
             max_download_bytes,
@@ -80,15 +73,36 @@ impl Downloader {
         let (temporary, metadata_path) = partial_paths(partial_directory, &artifact.url);
         let mut metadata = load_partial_metadata(&metadata_path, &temporary, &artifact.url)?;
         let downloaded = partial_length(metadata.as_ref(), &temporary)?;
-        if let Some((recovered, _recovered_length)) =
-            recover_previous_download(tool, version, artifact, workspace, &temporary, downloaded)?
-        {
+        if let Some((recovered, _recovered_length)) = recover_previous_download(
+            tool,
+            version,
+            artifact,
+            workspace,
+            &temporary,
+            downloaded,
+            self.max_download_bytes,
+        )? {
             metadata = Some(recovered);
         }
         let resume = prepare_resume(&metadata_path, &temporary, metadata)?;
         let mut metadata = resume.metadata;
         let mut downloaded = resume.downloaded;
         let mut hasher = resume.hasher;
+        if downloaded > self.max_download_bytes {
+            // 配额收紧后，旧上限时代留下的超限缓存不再续传：丢弃后从零重新下载，
+            // 让新配额在正常的传输路径上重新校验。
+            tracing::warn!(
+                tool = %tool.id,
+                url = %artifact.url,
+                cached_bytes = downloaded,
+                limit_bytes = self.max_download_bytes,
+                "cached partial download exceeds the download limit; restarting from zero"
+            );
+            clear_partial(&metadata_path, &temporary)?;
+            metadata = None;
+            downloaded = 0;
+            hasher = Sha256::new();
+        }
 
         let mut transfer_attempt = 1;
         let mut restarts = 0;
@@ -103,11 +117,13 @@ impl Downloader {
                 validator,
             )?;
 
-            // 416 可能表示缓存文件已完整；仅当服务器报告的长度等于缓存长度且已有校验标识未变化时接受。
+            // 416 可能表示缓存文件已完整；仅当服务器报告的长度等于缓存长度、
+            // 不超过下载上限且已有校验标识未变化时接受。
             if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
                 let remote_total = unsatisfied_total(&response);
                 if requested_offset > 0
                     && remote_total == Some(requested_offset)
+                    && remote_total.is_some_and(|total| total <= self.max_download_bytes)
                     && metadata
                         .as_ref()
                         .is_some_and(|partial| validator_unchanged(&response, partial.validator()))

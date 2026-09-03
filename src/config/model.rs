@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::archive::ExtractionLimits;
 pub use crate::domain::{
     ArtifactConfig, ExistingPolicy, HookAction, HookConfig, HookWorkingDirectory, InputMode,
     NetworkConfig, OutputMode, ReleaseConfig,
@@ -20,6 +21,9 @@ pub struct ManifestFile {
     pub network: NetworkConfig,
     #[serde(default)]
     pub defaults: DefaultsConfig,
+    /// 解压与下载的累计配额；省略时使用默认值 8 GiB / 100000 条目。
+    #[serde(default, skip_serializing_if = "ExtractionLimits::is_default")]
+    pub extraction_limits: ExtractionLimits,
 }
 
 /// 私有 YAML 模型：在反序列化边界承载 `allow_insecure_transports`，
@@ -37,6 +41,9 @@ pub(crate) struct RawManifest {
     pub network: NetworkConfig,
     #[serde(default)]
     pub defaults: DefaultsConfig,
+    /// 解压与下载的累计配额；省略时使用默认值 8 GiB / 100000 条目。
+    #[serde(default, skip_serializing_if = "ExtractionLimits::is_default")]
+    pub extraction_limits: ExtractionLimits,
 }
 
 impl From<RawManifest> for ManifestFile {
@@ -47,6 +54,7 @@ impl From<RawManifest> for ManifestFile {
             paths: raw.paths,
             network: raw.network,
             defaults: raw.defaults,
+            extraction_limits: raw.extraction_limits,
         }
     }
 }
@@ -162,6 +170,8 @@ pub struct InstallConfig {
     pub archive_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archive_password: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_symlinks_in_archive: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub executable: Vec<PathBuf>,
     #[serde(skip_serializing_if = "Vec::is_empty")]

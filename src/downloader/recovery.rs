@@ -17,6 +17,7 @@ pub(super) fn recover_previous_download(
     workspace: &ToolWorkspace,
     partial: &Path,
     current_length: u64,
+    max_download_bytes: u64,
 ) -> Result<Option<(PartialMetadata, u64)>> {
     let Some(filename) = artifact.filename.as_deref().and_then(safe_filename) else {
         return Ok(None);
@@ -38,6 +39,18 @@ pub(super) fn recover_previous_download(
         .with_context(|| format!("cannot inspect previous download {}", previous.display()))?
         .len();
     if previous_length <= current_length {
+        return Ok(None);
+    }
+    // 配额收紧后旧产物可能已超过当前上限：复制之前放弃恢复，
+    // 让调用方从零重下并在传输路径上按新配额校验。
+    if previous_length > max_download_bytes {
+        tracing::debug!(
+            tool = %tool.id,
+            filename,
+            bytes = previous_length,
+            limit_bytes = max_download_bytes,
+            "previous download exceeds the download limit; skipping recovery"
+        );
         return Ok(None);
     }
 

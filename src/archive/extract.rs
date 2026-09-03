@@ -1,6 +1,7 @@
+use std::fmt::Display;
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::Result;
 use bzip2::read::BzDecoder;
@@ -14,28 +15,253 @@ use zip::{CompressionMethod, read::ZipFile};
 
 use crate::error::UpdaterError;
 
+use super::{ExtractionContext, ExtractionLimits};
+
+fn archive_error(path: &Path, message: impl Display) -> UpdaterError {
+    UpdaterError::Archive {
+        path: path.to_path_buf(),
+        message: message.to_string(),
+    }
+}
+
 const IO_BUFFER_BYTES: usize = 256 * 1024;
 
-pub(super) fn zip(archive_path: &Path, destination: &Path, password: Option<&str>) -> Result<()> {
+/// 跨条目累计的解压配额：声明大小在解压前预扣以便快速失败，
+/// 实际写出的字节数记在另一本账上，谎报头部的归档同样会撞到上限。
+struct Quota {
+    limits: ExtractionLimits,
+    tool_prefix: String,
+    declared_bytes: u64,
+    actual_bytes: u64,
+    entries: usize,
+}
+
+impl Quota {
+    fn new(context: &ExtractionContext<'_>) -> Self {
+        Self {
+            limits: context.limits,
+            tool_prefix: context
+                .tool_id
+                .map(|id| format!("tool {id}: "))
+                .unwrap_or_default(),
+            declared_bytes: 0,
+            actual_bytes: 0,
+            entries: 0,
+        }
+    }
+
+    fn charge(
+        &mut self,
+        archive: &Path,
+        entry: &str,
+        size: u64,
+    ) -> std::result::Result<(), UpdaterError> {
+        self.entries += 1;
+        if self.entries > self.limits.max_entries {
+            return Err(archive_error(
+                archive,
+                format!(
+                    "{}extraction quota exceeded at entry {entry:?}: entry count {} exceeds max_entries {}",
+                    self.tool_prefix, self.entries, self.limits.max_entries
+                ),
+            ));
+        }
+        self.charge_bytes(archive, entry, size)
+    }
+
+    fn charge_bytes(
+        &mut self,
+        archive: &Path,
+        entry: &str,
+        size: u64,
+    ) -> std::result::Result<(), UpdaterError> {
+        self.declared_bytes = self.declared_bytes.saturating_add(size);
+        if self.declared_bytes > self.limits.max_total_bytes {
+            return Err(archive_error(
+                archive,
+                format!(
+                    "{}extraction quota exceeded at entry {entry:?}: cumulative uncompressed size {} bytes exceeds max_total_bytes {} bytes",
+                    self.tool_prefix, self.declared_bytes, self.limits.max_total_bytes
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// 对实际写入磁盘的字节数单独计费，独立于声明大小的账本。
+    fn charge_actual(
+        &mut self,
+        archive: &Path,
+        size: u64,
+    ) -> std::result::Result<(), UpdaterError> {
+        self.actual_bytes = self.actual_bytes.saturating_add(size);
+        if self.actual_bytes > self.limits.max_total_bytes {
+            return Err(self.actual_violation(archive));
+        }
+        Ok(())
+    }
+
+    /// 输出侧账本还能接受的字节数。
+    fn remaining_actual(&self) -> u64 {
+        self.limits
+            .max_total_bytes
+            .saturating_sub(self.actual_bytes)
+    }
+
+    fn tool_prefix(&self) -> &str {
+        &self.tool_prefix
+    }
+
+    fn actual_violation(&self, archive: &Path) -> UpdaterError {
+        archive_error(
+            archive,
+            format!(
+                "{}extraction quota exceeded: extracted output of {} bytes exceeds max_total_bytes {} bytes",
+                self.tool_prefix, self.actual_bytes, self.limits.max_total_bytes
+            ),
+        )
+    }
+}
+
+/// 解压输出侧的写入守卫：统计实际交给底层 sink 的字节数，
+/// 剩余配额耗尽后拒绝继续写入，让超限载荷在写盘中途立即中断。
+struct CountingWriter<W> {
+    inner: W,
+    remaining: u64,
+    written: u64,
+    tripped: bool,
+}
+
+impl<W: Write> CountingWriter<W> {
+    fn new(inner: W, remaining: u64) -> Self {
+        Self {
+            inner,
+            remaining,
+            written: 0,
+            tripped: false,
+        }
+    }
+
+    fn written(&self) -> u64 {
+        self.written
+    }
+
+    fn tripped(&self) -> bool {
+        self.tripped
+    }
+}
+
+impl<W: Write> Write for CountingWriter<W> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        if self.remaining == 0 {
+            self.tripped = true;
+            return Err(io::Error::other("extraction output quota exceeded"));
+        }
+        let allowed = (buffer.len() as u64).min(self.remaining) as usize;
+        let written = self.inner.write(&buffer[..allowed])?;
+        self.remaining -= written as u64;
+        self.written += written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// 7z 后端自管输出时的读取侧守卫：解压字节流经时计数，
+/// 剩余配额耗尽后停止向后端供数。
+struct CountingReader<'a> {
+    inner: &'a mut dyn Read,
+    remaining: u64,
+    counted: u64,
+    tripped: bool,
+    /// 配额耗尽后探测读出的字节，等下一次 read 归还，避免丢弃数据。
+    pending: Option<u8>,
+}
+
+impl<'a> CountingReader<'a> {
+    fn new(inner: &'a mut dyn Read, remaining: u64) -> Self {
+        Self {
+            inner,
+            remaining,
+            counted: 0,
+            tripped: false,
+            pending: None,
+        }
+    }
+
+    fn counted(&self) -> u64 {
+        self.counted
+    }
+
+    fn tripped(&self) -> bool {
+        self.tripped
+    }
+}
+
+impl Read for CountingReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        if let Some(byte) = self.pending.take() {
+            buffer[0] = byte;
+            return Ok(1);
+        }
+        if self.remaining == 0 {
+            // 累计输出恰好等于配额是合法归档：后端会再读一次确认 EOF，
+            // 此处先对底层做单字节探测，真 EOF 返回 Ok(0)，读到数据才判超额。
+            let mut probe = [0_u8; 1];
+            let probed = self.inner.read(&mut probe)?;
+            if probed == 0 {
+                return Ok(0);
+            }
+            self.counted += probed as u64;
+            self.pending = Some(probe[0]);
+            self.tripped = true;
+            return Err(io::Error::other("extraction output quota exceeded"));
+        }
+        let allowed = (buffer.len() as u64).min(self.remaining) as usize;
+        let read = self.inner.read(&mut buffer[..allowed])?;
+        self.remaining -= read as u64;
+        self.counted += read as u64;
+        Ok(read)
+    }
+}
+
+pub(super) fn zip(
+    archive_path: &Path,
+    destination: &Path,
+    password: Option<&str>,
+    context: &ExtractionContext<'_>,
+) -> Result<()> {
     let file = File::open(archive_path)?;
     let mut archive = zip::ZipArchive::new(BufReader::with_capacity(IO_BUFFER_BYTES, file))
-        .map_err(|error| UpdaterError::Archive {
-            path: archive_path.to_path_buf(),
-            message: error.to_string(),
-        })?;
+        .map_err(|error| zip_error(archive_path, error))?;
+    let mut quota = Quota::new(context);
     for index in 0..archive.len() {
-        let (compression, encrypted) = {
+        let (compression, encrypted, size, name) = {
             let entry = archive
                 .by_index_raw(index)
                 .map_err(|error| zip_error(archive_path, error))?;
-            (entry.compression(), entry.encrypted())
+            (
+                entry.compression(),
+                entry.encrypted(),
+                entry.size(),
+                entry.name().to_owned(),
+            )
         };
+        quota.charge(archive_path, &name, size)?;
         if compression == CompressionMethod::Lzma {
             if encrypted {
-                return Err(UpdaterError::Archive {
-                    path: archive_path.to_path_buf(),
-                    message: "encrypted ZIP LZMA entries are not supported".to_owned(),
-                }
+                return Err(archive_error(
+                    archive_path,
+                    "encrypted ZIP LZMA entries are not supported",
+                )
                 .into());
             }
             let mut entry = archive
@@ -52,7 +278,15 @@ pub(super) fn zip(archive_path: &Path, destination: &Path, password: Option<&str
             let file = File::create(&output)?;
             let unpacked_size = entry.size();
             let crc32 = entry.crc32();
-            extract_zip_lzma(&mut entry, file, unpacked_size, crc32, archive_path)?;
+            // CheckedZipWriter::finish 会 flush，此后读取 written 与落盘字节数一致。
+            let mut limited = CountingWriter::new(file, quota.remaining_actual());
+            let extracted =
+                extract_zip_lzma(&mut entry, &mut limited, unpacked_size, crc32, archive_path);
+            quota.charge_actual(archive_path, limited.written())?;
+            if limited.tripped() {
+                return Err(quota.actual_violation(archive_path).into());
+            }
+            extracted?;
             #[cfg(unix)]
             set_zip_permissions(&output, &entry)?;
             continue;
@@ -71,7 +305,14 @@ pub(super) fn zip(archive_path: &Path, destination: &Path, password: Option<&str
         if let Some(parent) = output.parent() {
             fs::create_dir_all(parent)?;
         }
-        copy_buffered(&mut entry, File::create(&output)?)?;
+        // copy_buffered 返回前会 flush BufWriter，此后读取 written 与落盘字节数一致。
+        let mut limited = CountingWriter::new(File::create(&output)?, quota.remaining_actual());
+        let copied = copy_buffered(&mut entry, &mut limited);
+        quota.charge_actual(archive_path, limited.written())?;
+        if limited.tripped() {
+            return Err(quota.actual_violation(archive_path).into());
+        }
+        copied?;
         #[cfg(unix)]
         set_zip_permissions(&output, &entry)?;
     }
@@ -238,105 +479,271 @@ fn set_zip_permissions(output: &Path, entry: &ZipFile<'_>) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn seven_zip(archive: &Path, destination: &Path, password: Option<&str>) -> Result<()> {
-    let result = if let Some(password) = password {
-        sevenz_rust::decompress_file_with_password(archive, destination, password.into())
-    } else {
-        sevenz_rust::decompress_file(archive, destination)
-    };
-    result.map_err(|error| {
-        UpdaterError::Archive {
-            path: archive.to_path_buf(),
-            message: format!("7z extraction failed: {error}"),
+pub(super) fn seven_zip(
+    archive: &Path,
+    destination: &Path,
+    password: Option<&str>,
+    context: &ExtractionContext<'_>,
+) -> Result<()> {
+    let mut quota = Quota::new(context);
+    let mut violation = None;
+    let extract = |entry: &sevenz_rust::ArchiveEntry,
+                   reader: &mut dyn Read,
+                   dest: &PathBuf|
+     -> std::result::Result<bool, sevenz_rust::Error> {
+        if let Err(error) = quota.charge(archive, &entry.name, entry.size) {
+            violation = Some(error);
+            return Err(sevenz_rust::Error::Other(
+                "extraction quota exceeded".into(),
+            ));
         }
-        .into()
-    })
+        let mut limited = CountingReader::new(reader, quota.remaining_actual());
+        let result = sevenz_rust::default_entry_extract_fn(entry, &mut limited, dest);
+        if let Err(error) = quota.charge_actual(archive, limited.counted()) {
+            violation = Some(error);
+            return Err(sevenz_rust::Error::Other(
+                "extraction quota exceeded".into(),
+            ));
+        }
+        if limited.tripped() {
+            violation = Some(quota.actual_violation(archive));
+            return Err(sevenz_rust::Error::Other(
+                "extraction quota exceeded".into(),
+            ));
+        }
+        result
+    };
+    let result = if let Some(password) = password {
+        sevenz_rust::decompress_with_extract_fn_and_password(
+            File::open(archive)?,
+            destination,
+            password.into(),
+            extract,
+        )
+    } else {
+        sevenz_rust::decompress_file_with_extract_fn(archive, destination, extract)
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => match violation {
+            Some(error) => Err(error.into()),
+            None => Err(archive_error(archive, format!("7z extraction failed: {error}")).into()),
+        },
+    }
 }
 
-pub(super) fn rar(archive: &Path, destination: &Path, password: Option<&str>) -> Result<()> {
+pub(super) fn rar(
+    archive: &Path,
+    destination: &Path,
+    password: Option<&str>,
+    context: &ExtractionContext<'_>,
+) -> Result<()> {
     let file = File::open(archive)?;
     let mut reader = if let Some(password) = password {
         RarArchive::open_with_password(file, password)
     } else {
         RarArchive::open(file)
     }
-    .map_err(|error| UpdaterError::Archive {
-        path: archive.to_path_buf(),
-        message: format!("RAR open failed: {error}"),
-    })?;
+    .map_err(|error| archive_error(archive, format!("RAR open failed: {error}")))?;
     let options = ExtractOptions {
         verify: true,
         password: password.map(ToOwned::to_owned),
         restore_owners: false,
     };
+    let destination_root = destination
+        .canonicalize()
+        .unwrap_or_else(|_| destination.to_path_buf());
+    let mut quota = Quota::new(context);
+    // 库级输出上限在每个成员解压前压到剩余配额：未声明大小或声明不可信的
+    // 成员会在写盘中途被库拦截，落盘后的 charge_actual 仅作复核。
+    let mut rar_limits = unrar_rs::Limits::default();
 
     for member in reader.indexed_member_infos() {
         if !member.extractable {
-            return Err(UpdaterError::Archive {
-                path: archive.to_path_buf(),
-                message: format!(
+            return Err(archive_error(
+                archive,
+                format!(
                     "RAR member {:?} requires missing volumes {:?}",
                     member.info.name, member.missing_volumes
                 ),
-            }
+            )
             .into());
         }
-        let relative =
-            safe_rar_member_path(&member.info.name).ok_or_else(|| UpdaterError::Archive {
-                path: archive.to_path_buf(),
-                message: format!("unsafe RAR entry {:?}", member.info.raw_name),
-            })?;
+        quota.charge(
+            archive,
+            &member.info.name,
+            member.info.unpacked_size.unwrap_or(0),
+        )?;
+        let relative = safe_rar_member_path(&member.info.name).ok_or_else(|| {
+            archive_error(
+                archive,
+                format!("unsafe RAR entry {:?}", member.info.raw_name),
+            )
+        })?;
+        // unrar-rs 已把 UnixSymlink/WindowsSymlink/WindowsJunction 归一为 is_symlink。
+        if member.info.is_symlink || member.info.is_hardlink {
+            ensure_rar_link_is_allowed(
+                archive,
+                destination,
+                &destination_root,
+                relative,
+                member.info.is_hardlink,
+                member.info.link_target.as_deref(),
+                context,
+            )?;
+        }
         let output = destination.join(relative);
         if let Some(parent) = output.parent() {
             fs::create_dir_all(parent)?;
         }
-        reader
+        rar_limits.max_unpacked_size = rar_member_output_limit(
+            quota.remaining_actual(),
+            member.info.unpacked_size,
+            member.info.compression.method,
+        );
+        reader.set_limits(rar_limits.clone());
+        let written = reader
             .extract_member_to_file(member.index, &options, None, &output)
-            .map_err(|error| UpdaterError::Archive {
-                path: archive.to_path_buf(),
-                message: format!("RAR extraction failed for {:?}: {error}", member.info.name),
+            .map_err(|error| {
+                // 库侧 ResourceLimit 拦截就是配额违规，与其他配额错误一样带工具归属。
+                let tool_prefix = if matches!(error, unrar_rs::RarError::ResourceLimit { .. }) {
+                    quota.tool_prefix()
+                } else {
+                    ""
+                };
+                archive_error(
+                    archive,
+                    format!(
+                        "{tool_prefix}RAR extraction failed for {:?}: {error}",
+                        member.info.name
+                    ),
+                )
             })?;
+        quota.charge_actual(archive, written)?;
     }
     Ok(())
 }
 
-pub(super) fn tar_gzip(archive: &Path, destination: &Path) -> Result<()> {
+/// RAR 链接成员默认拒绝，与 tar 策略一致。opt-in 路径复用 tar 侧的
+/// 界内校验；RAR3 的 symlink 目标位于成员载荷、头部无目标，保持拒绝。
+fn ensure_rar_link_is_allowed(
+    archive_path: &Path,
+    destination: &Path,
+    destination_root: &Path,
+    member: &Path,
+    is_hardlink: bool,
+    target: Option<&str>,
+    context: &ExtractionContext<'_>,
+) -> Result<()> {
+    let kind = if is_hardlink {
+        "hard link"
+    } else {
+        "symbolic link"
+    };
+    let tool_prefix = link_tool_prefix(context);
+    if !context.allow_symlinks {
+        return Err(archive_error(
+            archive_path,
+            format!(
+                "{tool_prefix}RAR member {member:?} is a {kind}; set install.allow_symlinks_in_archive to allow links"
+            ),
+        )
+        .into());
+    }
+    let target = target.ok_or_else(|| {
+        archive_error(
+            archive_path,
+            format!("{tool_prefix}RAR member {member:?} is a {kind} without a target"),
+        )
+    })?;
+    ensure_bounded_link_target(
+        archive_path,
+        destination,
+        destination_root,
+        kind,
+        member,
+        Path::new(target),
+    )
+}
+
+fn rar_member_output_limit(
+    remaining: u64,
+    unpacked_size: Option<u64>,
+    compression: unrar_rs::CompressionMethod,
+) -> u64 {
+    // unrar-rs 0.5.5 treats `written >= max_unpacked_size` as an overflow for
+    // compressed members whose size is unknown. Reserve one probe byte so an
+    // output exactly equal to our inclusive quota remains valid; Quota still
+    // rejects any successful extraction whose actual output exceeds remaining.
+    if unpacked_size.is_none() && compression != unrar_rs::CompressionMethod::Store {
+        remaining.saturating_add(1)
+    } else {
+        remaining
+    }
+}
+
+pub(super) fn tar_gzip(
+    archive: &Path,
+    destination: &Path,
+    context: &ExtractionContext<'_>,
+) -> Result<()> {
     extract_tar(
         GzDecoder::new(buffered_archive(archive)?),
         archive,
         destination,
+        context,
     )
 }
 
-pub(super) fn tar_bzip2(archive: &Path, destination: &Path) -> Result<()> {
+pub(super) fn tar_bzip2(
+    archive: &Path,
+    destination: &Path,
+    context: &ExtractionContext<'_>,
+) -> Result<()> {
     extract_tar(
         BzDecoder::new(buffered_archive(archive)?),
         archive,
         destination,
+        context,
     )
 }
 
-pub(super) fn tar_xz(archive: &Path, destination: &Path) -> Result<()> {
+pub(super) fn tar_xz(
+    archive: &Path,
+    destination: &Path,
+    context: &ExtractionContext<'_>,
+) -> Result<()> {
     extract_tar(
         XzDecoder::new(buffered_archive(archive)?),
         archive,
         destination,
+        context,
     )
 }
 
-pub(super) fn gzip(archive: &Path, destination: &Path) -> Result<()> {
+pub(super) fn gzip(
+    archive: &Path,
+    destination: &Path,
+    context: &ExtractionContext<'_>,
+) -> Result<()> {
     extract_single(
         GzDecoder::new(buffered_archive(archive)?),
         archive,
         destination,
+        context,
     )
 }
 
-pub(super) fn xz(archive: &Path, destination: &Path) -> Result<()> {
+pub(super) fn xz(
+    archive: &Path,
+    destination: &Path,
+    context: &ExtractionContext<'_>,
+) -> Result<()> {
     extract_single(
         XzDecoder::new(buffered_archive(archive)?),
         archive,
         destination,
+        context,
     )
 }
 
@@ -354,42 +761,261 @@ fn copy_buffered<R: Read, W: Write>(input: &mut R, output: W) -> io::Result<u64>
     Ok(copied)
 }
 
-fn extract_tar<R: io::Read>(reader: R, archive_path: &Path, destination: &Path) -> Result<()> {
+fn extract_tar<R: io::Read>(
+    reader: R,
+    archive_path: &Path,
+    destination: &Path,
+    context: &ExtractionContext<'_>,
+) -> Result<()> {
     let mut archive = TarArchive::new(reader);
-    let entries = archive.entries().map_err(|error| UpdaterError::Archive {
-        path: archive_path.to_path_buf(),
-        message: error.to_string(),
-    })?;
+    let entries = archive
+        .entries()
+        .map_err(|error| archive_error(archive_path, error))?;
+    let mut symlinks = Vec::new();
+    let destination_root = destination
+        .canonicalize()
+        .unwrap_or_else(|_| destination.to_path_buf());
+    let mut quota = Quota::new(context);
     for entry in entries {
-        let mut entry = entry.map_err(|error| UpdaterError::Archive {
-            path: archive_path.to_path_buf(),
-            message: error.to_string(),
-        })?;
+        let mut entry = entry.map_err(|error| archive_error(archive_path, error))?;
+        // Entry::size includes PAX overrides and GNU sparse logical size;
+        // Header::size only exposes the raw header value and can undercount.
+        let size = entry.size();
+        let entry_name = entry
+            .path()
+            .map_err(|error| archive_error(archive_path, error))?
+            .display()
+            .to_string();
+        quota.charge(archive_path, &entry_name, size)?;
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_symlink() || entry_type.is_hard_link() {
+            let symlink = validate_tar_link(
+                archive_path,
+                destination,
+                &destination_root,
+                &mut entry,
+                context,
+            )?;
+            if let Some(symlink) = symlink {
+                symlinks.push(symlink);
+                continue;
+            }
+        }
         let unpacked = entry
             .unpack_in(destination)
-            .map_err(|error| UpdaterError::Archive {
-                path: archive_path.to_path_buf(),
-                message: error.to_string(),
-            })?;
+            .map_err(|error| archive_error(archive_path, error))?;
         if !unpacked {
-            return Err(UpdaterError::Archive {
-                path: archive_path.to_path_buf(),
-                message: "archive entry attempted to escape the destination".to_owned(),
-            }
+            return Err(archive_error(
+                archive_path,
+                "archive entry attempted to escape the destination",
+            )
             .into());
+        }
+        if entry_type.is_file() {
+            // tar 头部声明的 size 决定读取流长度，落盘后再按实际字节数复核。
+            let written = entry
+                .path()
+                .ok()
+                .and_then(|path| fs::metadata(destination.join(path.as_ref())).ok())
+                .map(|metadata| metadata.len())
+                .unwrap_or(size);
+            quota.charge_actual(archive_path, written)?;
+        }
+    }
+    // Windows 创建 symlink 时必须提前指定文件或目录类型，因此等普通条目
+    // 全部落盘后再按最终目标类型建链，避免结果依赖 tar 条目顺序。
+    for symlink in symlinks {
+        create_tar_symlink(destination, &symlink)?;
+    }
+    Ok(())
+}
+
+struct PendingTarSymlink {
+    path: PathBuf,
+    target: PathBuf,
+}
+
+/// 自建 tar 符号链接：tar 0.4.46 在 Windows 对所有 symlink 固定
+/// symlink_file，指向目录的链接无法跟随；这里在普通条目全部落盘后
+/// 按目标类型选择创建方式。
+fn create_tar_symlink(destination: &Path, symlink: &PendingTarSymlink) -> Result<()> {
+    let link = destination.join(&symlink.path);
+    if let Some(parent) = link.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&symlink.target, &link)?;
+    #[cfg(windows)]
+    {
+        // NT 路径解析只把反斜杠当分隔符，正斜杠的 tar 目标会让链接无法跟随。
+        let target = PathBuf::from(symlink.target.to_string_lossy().replace('/', "\\"));
+        let resolved = link.parent().unwrap_or(destination).join(&target);
+        let target_is_directory = fs::metadata(&resolved).is_ok_and(|metadata| metadata.is_dir());
+        if target_is_directory {
+            std::os::windows::fs::symlink_dir(&target, &link)?;
+        } else {
+            std::os::windows::fs::symlink_file(&target, &link)?;
         }
     }
     Ok(())
 }
 
-fn extract_single<R: io::Read>(mut reader: R, archive: &Path, destination: &Path) -> Result<()> {
-    let filename = archive.file_stem().ok_or_else(|| UpdaterError::Archive {
-        path: archive.to_path_buf(),
-        message: "archive has no filename".to_owned(),
-    })?;
-    let mut output = File::create(destination.join(filename))?;
-    io::copy(&mut reader, &mut output)?;
+/// 符号链接与硬链接默认拒绝，与自更新链路的安全基线一致。
+/// opt-in 路径仍要求链接目标为相对路径且解析后位于解压目录内。
+fn validate_tar_link<R: io::Read>(
+    archive_path: &Path,
+    destination: &Path,
+    destination_root: &Path,
+    entry: &mut tar::Entry<'_, R>,
+    context: &ExtractionContext<'_>,
+) -> Result<Option<PendingTarSymlink>> {
+    let path = entry
+        .path()
+        .map_err(|error| archive_error(archive_path, error))?;
+    let is_symlink = entry.header().entry_type().is_symlink();
+    let kind = if is_symlink {
+        "symbolic link"
+    } else {
+        "hard link"
+    };
+    let tool_prefix = link_tool_prefix(context);
+    if !context.allow_symlinks {
+        return Err(archive_error(
+            archive_path,
+            format!(
+                "{tool_prefix}archive entry {path:?} is a {kind}; set install.allow_symlinks_in_archive to allow links"
+            ),
+        )
+        .into());
+    }
+    let target = entry
+        .link_name()
+        .map_err(|error| archive_error(archive_path, error))?
+        .ok_or_else(|| {
+            archive_error(
+                archive_path,
+                format!("{tool_prefix}archive entry {path:?} is a {kind} without a target"),
+            )
+        })?;
+    ensure_bounded_link_target(
+        archive_path,
+        destination,
+        destination_root,
+        kind,
+        path.as_ref(),
+        target.as_ref(),
+    )?;
+    if !is_symlink {
+        return Ok(None);
+    }
+    // 自建 symlink 不经过 unpack_in，需在拼接前拒绝不安全的条目路径。
+    if path.components().any(|component| {
+        matches!(
+            component,
+            Component::RootDir | Component::Prefix(_) | Component::ParentDir
+        )
+    }) {
+        return Err(archive_error(
+            archive_path,
+            "archive entry attempted to escape the destination",
+        )
+        .into());
+    }
+    Ok(Some(PendingTarSymlink {
+        path: path.into_owned(),
+        target: target.into_owned(),
+    }))
+}
+
+/// 链接目标必须是相对路径，且与条目位置拼接后仍位于解压目录内。
+/// 供 tar/RAR 解压校验与安装侧的最终目录复验共用。
+pub(crate) fn ensure_bounded_link_target(
+    archive_path: &Path,
+    destination: &Path,
+    destination_root: &Path,
+    kind: &str,
+    member: &Path,
+    target: &Path,
+) -> Result<()> {
+    if target.is_absolute() {
+        return Err(archive_error(
+            archive_path,
+            format!("{kind} {member:?} target {target:?} must be relative"),
+        )
+        .into());
+    }
+    let link_directory = destination
+        .join(member)
+        .parent()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            archive_error(
+                archive_path,
+                format!("{kind} {member:?} has no parent directory"),
+            )
+        })?;
+    let resolved = link_directory.join(target);
+    let contained = match resolved.canonicalize() {
+        Ok(real) => real.starts_with(destination_root),
+        Err(_) => {
+            // 目标可能尚未落盘：按词法归一化后对照两个形式的解压根目录。
+            let lexical = lexical_root(&resolved);
+            lexical.starts_with(destination) || lexical.starts_with(destination_root)
+        }
+    };
+    if !contained {
+        return Err(archive_error(
+            archive_path,
+            format!("{kind} {member:?} target {target:?} escapes the extraction directory"),
+        )
+        .into());
+    }
     Ok(())
+}
+
+/// 词法归一化 `.` 与 `..` 分量，使尚未物化的链接目标也能对照解压根目录检查。
+fn lexical_root(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+/// 链接拒绝错误中的工具归属前缀；非工具作用域解压时为空。
+fn link_tool_prefix(context: &ExtractionContext<'_>) -> String {
+    context
+        .tool_id
+        .map(|id| format!("tool {id}: "))
+        .unwrap_or_default()
+}
+
+fn extract_single<R: io::Read>(
+    mut reader: R,
+    archive: &Path,
+    destination: &Path,
+    context: &ExtractionContext<'_>,
+) -> Result<()> {
+    let filename = archive
+        .file_stem()
+        .ok_or_else(|| archive_error(archive, "archive has no filename"))?;
+    let mut quota = Quota::new(context);
+    let mut output = File::create(destination.join(filename))?;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(());
+        }
+        quota.charge_actual(archive, read as u64)?;
+        output.write_all(&buffer[..read])?;
+    }
 }
 
 fn safe_rar_member_path(value: &str) -> Option<&Path> {
@@ -413,7 +1039,7 @@ fn safe_rar_member_path(value: &str) -> Option<&Path> {
 mod tests {
     use std::io::{self, Read, Write};
 
-    use super::{IO_BUFFER_BYTES, copy_buffered};
+    use super::{CountingReader, IO_BUFFER_BYTES, copy_buffered, rar_member_output_limit};
 
     #[derive(Default)]
     struct CountingWriter {
@@ -459,5 +1085,71 @@ mod tests {
         assert_eq!(copied, payload.len() as u64);
         assert_eq!(output.bytes, payload.len());
         assert_eq!(output.calls, 3);
+    }
+
+    #[test]
+    fn counting_reader_accepts_output_equal_to_the_quota() {
+        let payload = vec![1_u8; 4];
+        let mut underlying = ChunkedReader {
+            remaining: &payload,
+        };
+        let mut limited = CountingReader::new(&mut underlying, 4);
+
+        let copied = io::copy(&mut limited, &mut io::sink()).unwrap();
+
+        assert_eq!(copied, 4);
+        assert_eq!(limited.counted(), 4);
+        assert!(!limited.tripped());
+    }
+
+    #[test]
+    fn counting_reader_trips_after_the_quota_when_more_data_remains() {
+        let payload = vec![1_u8; 5];
+        let mut underlying = ChunkedReader {
+            remaining: &payload,
+        };
+        let mut limited = CountingReader::new(&mut underlying, 4);
+
+        let error = io::copy(&mut limited, &mut io::sink()).unwrap_err();
+
+        assert_eq!(error.to_string(), "extraction output quota exceeded");
+        assert_eq!(limited.counted(), 5);
+        assert!(limited.tripped());
+    }
+
+    #[test]
+    fn counting_reader_returns_the_probed_byte_on_the_next_read() {
+        let payload = vec![7_u8; 5];
+        let mut underlying = ChunkedReader {
+            remaining: &payload,
+        };
+        let mut limited = CountingReader::new(&mut underlying, 4);
+
+        let mut buffer = [0_u8; 4];
+        assert_eq!(limited.read(&mut buffer).unwrap(), 4);
+        assert!(limited.read(&mut buffer).is_err());
+
+        // 探测读出的字节不能丢弃：错误之后如果后端仍读取，须原样归还。
+        let mut recovered = [0_u8; 1];
+        assert_eq!(limited.read(&mut recovered).unwrap(), 1);
+        assert_eq!(recovered[0], 7);
+    }
+
+    #[test]
+    fn rar_output_limit_keeps_exact_unknown_compressed_members_legal() {
+        use unrar_rs::CompressionMethod;
+
+        assert_eq!(
+            rar_member_output_limit(4, None, CompressionMethod::Normal),
+            5
+        );
+        assert_eq!(
+            rar_member_output_limit(4, None, CompressionMethod::Store),
+            4
+        );
+        assert_eq!(
+            rar_member_output_limit(4, Some(4), CompressionMethod::Normal),
+            4
+        );
     }
 }

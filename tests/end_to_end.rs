@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use tempfile::tempdir;
 use universal_tool_updater::app;
-use universal_tool_updater::archive::ArchiveService;
+use universal_tool_updater::archive::{ArchiveService, ExtractionLimits};
 use universal_tool_updater::cli::{Cli, Command};
 use universal_tool_updater::config::model::{
     ArtifactConfig, DefaultsConfig, ExistingPolicy, HookAction, HookConfig, InstallConfig,
@@ -105,6 +105,7 @@ fn resolves_downloads_and_repairs_a_corrupt_merge_archive() {
             ..NetworkConfig::default()
         },
         defaults,
+        extraction_limits: ExtractionLimits::default(),
     };
     let manifest_path = config_dir.join("manifest.yaml");
     // 公开 ManifestFile 不承载传输开关，本地明文测试服务通过附加行显式开启。
@@ -153,7 +154,7 @@ fn resolves_downloads_and_repairs_a_corrupt_merge_archive() {
     server.join().unwrap();
 
     let extracted = workspace.path().join("saved-archive");
-    ArchiveService
+    ArchiveService::default()
         .extract(&saved_archive, &extracted, None)
         .unwrap();
     assert_eq!(
@@ -267,6 +268,7 @@ fn runs_complete_tool_updates_in_parallel() {
             ..NetworkConfig::default()
         },
         defaults,
+        extraction_limits: ExtractionLimits::default(),
     };
     let manifest_path = config_dir.join("manifest.yaml");
     // 公开 ManifestFile 不承载传输开关，本地明文测试服务通过附加行显式开启。

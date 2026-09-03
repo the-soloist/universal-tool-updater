@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use crate::archive::ExtractionLimits;
 use crate::config::{AppConfig, Paths};
 use crate::display::width as display_width;
 use crate::domain::{InputMode, NetworkConfig, ReleaseConfig, Tool};
@@ -65,6 +66,7 @@ fn config() -> AppConfig {
         },
         network: NetworkConfig::default(),
         allow_insecure_transports: false,
+        extraction_limits: ExtractionLimits::default(),
         tools,
     }
 }

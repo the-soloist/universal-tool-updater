@@ -16,6 +16,7 @@ use anyhow::{Context, Result, bail};
 use tempfile::NamedTempFile;
 use toml::Value;
 
+use crate::archive::ExtractionLimits;
 use crate::config::model::{
     ArtifactConfig, DefaultsConfig, NetworkConfig, PathConfig, RawManifest, ReleaseConfig,
     SCHEMA_VERSION, ToolConfig, ToolFile,
@@ -95,6 +96,7 @@ pub fn migrate_directory(input: &Path, output: &Path) -> Result<()> {
         network: NetworkConfig::default(),
         defaults: DefaultsConfig::default(),
         allow_insecure_transports,
+        extraction_limits: ExtractionLimits::default(),
     };
     write_yaml_atomic(&output.join("manifest.yaml"), &manifest)?;
     if allow_insecure_transports {

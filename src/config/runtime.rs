@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use crate::archive::ExtractionLimits;
 use crate::domain::{NetworkConfig, Tool};
 
 #[derive(Debug)]
@@ -10,6 +11,7 @@ pub struct AppConfig {
     pub network: NetworkConfig,
     /// Permits plain-HTTP sources end to end; HTTPS remains the only default.
     pub allow_insecure_transports: bool,
+    pub extraction_limits: ExtractionLimits,
     pub tools: BTreeMap<String, Tool>,
 }
 

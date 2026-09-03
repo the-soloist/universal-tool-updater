@@ -77,6 +77,7 @@ defaults:
 | `allow_insecure_transports` | 否 | 默认 `false`，所有下载 URL 必须使用 HTTPS。显式设为 `true` 才允许 HTTP 明文源。该约束同样作用于页面抓取产物链接与下载重定向（HTTPS→HTTP 降级默认拒绝）。明文传输内容可被中间人篡改（如局域网 ARP 投毒替换工具二进制），建议仅对可信内网源开启。旧版 TOML 迁移遇到明文源时会自动写入 `true` 并输出警告。 |
 | `network` | 否 | 网络和并发配置；省略时使用默认值。 |
 | `defaults` | 否 | 工具安装默认值；工具自身的同名字段优先。 |
+| `extraction_limits` | 否 | 解压与下载配额；省略时使用默认值（见 2.5）。 |
 
 ### 2.2 paths
 
@@ -115,6 +116,15 @@ defaults:
 | `install.archive_name` | `{name} - {version}.7z` | `save: archive` 的输出文件名模板。 |
 
 `archive_name` 只能是文件名，不能包含目录；支持 `{id}`、`{name}`、`{version}` 三个占位符。最终保存为压缩包时扩展名必须为 `.7z`。
+
+### 2.5 extraction_limits
+
+| 字段 | 类型 | 默认值 | 约束 |
+| --- | --- | --- | --- |
+| `max_total_bytes` | integer | `8589934592`（8 GiB） | 必须大于 `0`。 |
+| `max_entries` | integer | `100000` | 必须大于 `0`。 |
+
+解压 zip/tar/7z/rar 时逐条目累计未压缩大小和条目数量，超过任一上限即在写入前拒绝；同时统计实际写出的字节数，归档头谎报大小时也会在写入中途中断。gz/xz 单文件解压按同一 `max_total_bytes` 计数。下载侧对 `Content-Length`（或续传的完整大小）执行同一 `max_total_bytes` 检查，超限直接报错。整个节点可省略，两个子字段也均可省略（分别取默认值）。
 
 ## 3. Profile 与工具字典
 
@@ -339,6 +349,7 @@ install:
 | `archive_name` | string | 7z 输出文件名模板。 |
 | `archive_password` | string | 解压加密输入包的密码，不能为空。 |
 | `executable` | path list | 安装后必须存在的相对文件；Unix 上添加执行位。 |
+| `allow_symlinks_in_archive` | boolean | 默认 `false`。是否允许输入压缩包内的 symlink/hardlink 条目（见 6.5）。 |
 | `symlinks` | mapping list | 安装完成后创建的符号链接。 |
 
 ### 6.1 input
@@ -400,6 +411,25 @@ install:
 - 符号链接目标不能重复、不能与自身源路径相同，也不能和其他工具管理的路径重叠。
 - `save: archive` 不能配置 `symlinks`。
 - `input: copy` 不能配置 `archive_password`。
+
+### 6.5 allow_symlinks_in_archive
+
+解压 tar 与 RAR 时，包含 symlink 或 hardlink 条目的压缩包默认整体拒绝（错误信息附带工具 ID 与条目名），防止恶意归档植入指向系统目录的链接。确有需要时按工具显式开启：
+
+```yaml
+install:
+  destination: Tools/LinkedTool
+  allow_symlinks_in_archive: true
+```
+
+开启后仍有两条硬性约束，违反即拒绝：link 目标必须是相对路径；目标与条目位置拼接后（存在则 canonicalize，不存在则按文本归一化）必须仍在解压目录内。绝对目标或指向解压目录外部的目标一律拒绝。此外，`strip_single_root` 单根提升与多产物合并会改变链接的相对边界，因此 opt-in 放行过链接时，安装会在组装完成后以最终安装目录为根复验全部 symlink，目标越出最终安装目录即整体失败。
+
+安全边界说明：
+
+- RAR 的 Unix symlink、Windows symlink、junction（目录联接）与 hardlink 均按链接条目处理；RAR3 中目标位于成员载荷、头部无目标信息的 symlink 即使开启开关也保持拒绝。
+- 7z 后端无链接创建面（条目一律按普通文件提取），zip 后端本身不携带链接条目，均不受该开关影响。
+- Windows 上 tar symlink 会在普通条目全部落盘后按目标实际类型创建（目录用目录链接，其余用文件链接），不依赖目标与链接在归档中的先后顺序；目标最终仍不存在时按文件链接创建，因此目录型悬空链接不受支持。
+- 该开关只放宽"链接条目是否存在"，不会放宽上述界内约束；嵌套归档（解包后再解一层）沿用同一策略。
 
 ## 7. hooks：跨平台后处理
 

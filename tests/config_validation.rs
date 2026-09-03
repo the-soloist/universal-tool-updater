@@ -2,6 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use tempfile::tempdir;
+use universal_tool_updater::archive::ExtractionLimits;
 use universal_tool_updater::config;
 use universal_tool_updater::config::model::{
     DefaultsConfig, ManifestFile, NetworkConfig, OutputMode, PathConfig, ReleaseConfig,
@@ -318,6 +319,88 @@ tools:
             ..
         }
     ));
+}
+
+#[test]
+fn reads_extraction_limits_overrides_without_changing_schema_version() {
+    let directory = tempdir().unwrap();
+    fs::write(
+        directory.path().join("manifest.yaml"),
+        r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+extraction_limits:
+  max_total_bytes: 4096
+  max_entries: 5
+"#,
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("tools.yaml"),
+        r#"
+tools:
+  demo:
+    release:
+      type: github
+      repository: owner/repo
+    artifacts:
+      - type: github-asset
+        pattern: demo.zip
+    install:
+      destination: Demo
+"#,
+    )
+    .unwrap();
+
+    let loaded = config::load(&directory.path().join("manifest.yaml")).unwrap();
+    assert_eq!(loaded.extraction_limits.max_total_bytes, 4096);
+    assert_eq!(loaded.extraction_limits.max_entries, 5);
+
+    // 整个节点省略时回落到默认配额。
+    fs::write(
+        directory.path().join("manifest.yaml"),
+        r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+"#,
+    )
+    .unwrap();
+    let loaded = config::load(&directory.path().join("manifest.yaml")).unwrap();
+    assert_eq!(loaded.extraction_limits, ExtractionLimits::default());
+}
+
+#[test]
+fn rejects_non_positive_extraction_limits() {
+    for (manifest, expected) in [
+        (
+            r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+extraction_limits:
+  max_total_bytes: 0
+"#,
+            "extraction_limits.max_total_bytes must be greater than zero",
+        ),
+        (
+            r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+extraction_limits:
+  max_entries: 0
+"#,
+            "extraction_limits.max_entries must be greater than zero",
+        ),
+    ] {
+        assert_invalid_manifest(manifest, expected);
+    }
 }
 
 #[test]
@@ -994,6 +1077,71 @@ tools:
       destination: Reverse/Decompiler/IDA Pro
 "#,
         "unknown field",
+    );
+}
+
+#[test]
+fn parses_the_install_symlink_opt_in_and_defaults_to_false() {
+    let directory = tempdir().unwrap();
+    fs::write(
+        directory.path().join("manifest.yaml"),
+        r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+"#,
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("tools.yaml"),
+        r#"
+tools:
+  plain:
+    release:
+      type: github
+      repository: owner/plain
+    artifacts:
+      - type: github-asset
+        pattern: plain.tar.gz
+    install:
+      destination: Plain
+  linked:
+    release:
+      type: github
+      repository: owner/linked
+    artifacts:
+      - type: github-asset
+        pattern: linked.tar.gz
+    install:
+      destination: Linked
+      allow_symlinks_in_archive: true
+"#,
+    )
+    .unwrap();
+
+    let loaded = config::load(&directory.path().join("manifest.yaml")).unwrap();
+    assert!(!loaded.tools["plain"].install.allow_symlinks_in_archive);
+    assert!(loaded.tools["linked"].install.allow_symlinks_in_archive);
+}
+
+#[test]
+fn rejects_non_boolean_allow_symlinks_in_archive() {
+    assert_invalid_tool(
+        r#"
+tools:
+  linked:
+    release:
+      type: github
+      repository: owner/linked
+    artifacts:
+      - type: github-asset
+        pattern: linked.tar.gz
+    install:
+      destination: Linked
+      allow_symlinks_in_archive: banana
+"#,
+        "invalid type",
     );
 }
 
