@@ -105,10 +105,12 @@ fn resolves_downloads_and_repairs_a_corrupt_merge_archive() {
             ..NetworkConfig::default()
         },
         defaults,
-        allow_insecure_transports: true,
     };
     let manifest_path = config_dir.join("manifest.yaml");
-    fs::write(&manifest_path, yaml_serde::to_string(&manifest).unwrap()).unwrap();
+    // 公开 ManifestFile 不承载传输开关，本地明文测试服务通过附加行显式开启。
+    let mut manifest_yaml = yaml_serde::to_string(&manifest).unwrap();
+    manifest_yaml.push_str("allow_insecure_transports: true\n");
+    fs::write(&manifest_path, manifest_yaml).unwrap();
 
     app::run(Cli {
         manifest: Some(manifest_path.clone()),
@@ -265,10 +267,12 @@ fn runs_complete_tool_updates_in_parallel() {
             ..NetworkConfig::default()
         },
         defaults,
-        allow_insecure_transports: true,
     };
     let manifest_path = config_dir.join("manifest.yaml");
-    fs::write(&manifest_path, yaml_serde::to_string(&manifest).unwrap()).unwrap();
+    // 公开 ManifestFile 不承载传输开关，本地明文测试服务通过附加行显式开启。
+    let mut manifest_yaml = yaml_serde::to_string(&manifest).unwrap();
+    manifest_yaml.push_str("allow_insecure_transports: true\n");
+    fs::write(&manifest_path, manifest_yaml).unwrap();
 
     app::run(Cli {
         manifest: Some(manifest_path),

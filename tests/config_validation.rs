@@ -1,8 +1,12 @@
 use std::fs;
+use std::path::PathBuf;
 
 use tempfile::tempdir;
 use universal_tool_updater::config;
-use universal_tool_updater::config::model::{ManifestFile, OutputMode, ReleaseConfig};
+use universal_tool_updater::config::model::{
+    DefaultsConfig, ManifestFile, NetworkConfig, OutputMode, PathConfig, ReleaseConfig,
+    SCHEMA_VERSION,
+};
 
 #[test]
 fn reads_parallel_jobs_from_the_manifest() {
@@ -1211,32 +1215,41 @@ tools:
 
 #[test]
 fn parses_the_insecure_transport_opt_in_and_defaults_to_false() {
-    let manifest: ManifestFile = yaml_serde::from_str(
-        r#"
+    for (flag_text, expected) in [("", false), ("allow_insecure_transports: true\n", true)] {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("manifest.yaml"),
+            format!(
+                r#"
 schema_version: 5
 include: [tools.yaml]
 paths:
-  toolkit_root: ~/Tools/Toolkit
+  toolkit_root: Toolkit
+{flag_text}"#
+            ),
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("tools.yaml"),
+            r#"
+tools:
+  demo:
+    release:
+      type: web
+      url: https://example.com/releases
+      version_pattern: 'version=(.+)'
+    artifacts:
+      - type: direct-url
+        url: https://example.com/demo.zip
+    install:
+      destination: Demo
 "#,
-    )
-    .unwrap();
-    assert!(!manifest.allow_insecure_transports);
-    let encoded = yaml_serde::to_string(&manifest).unwrap();
-    assert!(!encoded.contains("allow_insecure_transports"));
+        )
+        .unwrap();
 
-    let opted_in: ManifestFile = yaml_serde::from_str(
-        r#"
-schema_version: 5
-include: [tools.yaml]
-paths:
-  toolkit_root: ~/Tools/Toolkit
-allow_insecure_transports: true
-"#,
-    )
-    .unwrap();
-    assert!(opted_in.allow_insecure_transports);
-    let encoded = yaml_serde::to_string(&opted_in).unwrap();
-    assert!(encoded.contains("allow_insecure_transports: true"));
+        let loaded = config::load(&directory.path().join("manifest.yaml")).unwrap();
+        assert_eq!(loaded.allow_insecure_transports, expected);
+    }
 }
 
 #[test]
@@ -1251,4 +1264,22 @@ allow_insecure_transports: banana
 "#,
         "invalid type",
     );
+}
+
+#[test]
+fn manifest_file_remains_constructible_with_its_public_fields() {
+    let manifest = ManifestFile {
+        schema_version: SCHEMA_VERSION,
+        include: vec!["tools.yaml".to_owned()],
+        paths: PathConfig {
+            toolkit_root: PathBuf::from("Toolkit"),
+            downloads: PathBuf::from("updates"),
+            staging: None,
+            state: PathBuf::from(".updater/state.yaml"),
+        },
+        network: NetworkConfig::default(),
+        defaults: DefaultsConfig::default(),
+    };
+    let encoded = yaml_serde::to_string(&manifest).unwrap();
+    assert!(encoded.contains("schema_version: 5"));
 }

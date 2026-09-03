@@ -74,7 +74,7 @@ defaults:
 | `schema_version` | 是 | 必须为 `5`。 |
 | `include` | 是 | 非空的 profile 文件列表。 |
 | `paths` | 是 | 全局路径配置。 |
-| `allow_insecure_transports` | 否 | 默认 `false`，所有下载 URL 必须使用 HTTPS。显式设为 `true` 才允许 HTTP 明文源。明文传输内容可被中间人篡改（如局域网 ARP 投毒替换工具二进制），建议仅对可信内网源开启。 |
+| `allow_insecure_transports` | 否 | 默认 `false`，所有下载 URL 必须使用 HTTPS。显式设为 `true` 才允许 HTTP 明文源。该约束同样作用于页面抓取产物链接与下载重定向（HTTPS→HTTP 降级默认拒绝）。明文传输内容可被中间人篡改（如局域网 ARP 投毒替换工具二进制），建议仅对可信内网源开启。旧版 TOML 迁移遇到明文源时会自动写入 `true` 并输出警告。 |
 | `network` | 否 | 网络和并发配置；省略时使用默认值。 |
 | `defaults` | 否 | 工具安装默认值；工具自身的同名字段优先。 |
 

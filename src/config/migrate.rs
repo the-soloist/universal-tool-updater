@@ -17,7 +17,7 @@ use tempfile::NamedTempFile;
 use toml::Value;
 
 use crate::config::model::{
-    ArtifactConfig, DefaultsConfig, ManifestFile, NetworkConfig, PathConfig, ReleaseConfig,
+    ArtifactConfig, DefaultsConfig, NetworkConfig, PathConfig, RawManifest, ReleaseConfig,
     SCHEMA_VERSION, ToolConfig, ToolFile,
 };
 
@@ -83,7 +83,7 @@ pub fn migrate_directory(input: &Path, output: &Path) -> Result<()> {
     for (path, file) in converted {
         write_yaml_atomic(&path, &file)?;
     }
-    let manifest = ManifestFile {
+    let manifest = RawManifest {
         schema_version: SCHEMA_VERSION,
         include,
         paths: PathConfig {
