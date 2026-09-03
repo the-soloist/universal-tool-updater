@@ -581,7 +581,11 @@ pub(super) fn rar(
         if let Some(parent) = output.parent() {
             fs::create_dir_all(parent)?;
         }
-        rar_limits.max_unpacked_size = quota.remaining_actual();
+        rar_limits.max_unpacked_size = rar_member_output_limit(
+            quota.remaining_actual(),
+            member.info.unpacked_size,
+            member.info.compression.method,
+        );
         reader.set_limits(rar_limits.clone());
         let written = reader
             .extract_member_to_file(member.index, &options, None, &output)
@@ -603,6 +607,22 @@ pub(super) fn rar(
         quota.charge_actual(archive, written)?;
     }
     Ok(())
+}
+
+fn rar_member_output_limit(
+    remaining: u64,
+    unpacked_size: Option<u64>,
+    compression: unrar_rs::CompressionMethod,
+) -> u64 {
+    // unrar-rs 0.5.5 treats `written >= max_unpacked_size` as an overflow for
+    // compressed members whose size is unknown. Reserve one probe byte so an
+    // output exactly equal to our inclusive quota remains valid; Quota still
+    // rejects any successful extraction whose actual output exceeds remaining.
+    if unpacked_size.is_none() && compression != unrar_rs::CompressionMethod::Store {
+        remaining.saturating_add(1)
+    } else {
+        remaining
+    }
 }
 
 pub(super) fn tar_gzip(
@@ -697,10 +717,9 @@ fn extract_tar<R: io::Read>(
     let mut quota = Quota::new(context);
     for entry in entries {
         let mut entry = entry.map_err(|error| archive_error(archive_path, error))?;
-        let size = entry
-            .header()
-            .size()
-            .map_err(|error| archive_error(archive_path, error))?;
+        // Entry::size includes PAX overrides and GNU sparse logical size;
+        // Header::size only exposes the raw header value and can undercount.
+        let size = entry.size();
         let entry_name = entry
             .path()
             .map_err(|error| archive_error(archive_path, error))?
@@ -775,7 +794,7 @@ fn safe_rar_member_path(value: &str) -> Option<&Path> {
 mod tests {
     use std::io::{self, Read, Write};
 
-    use super::{CountingReader, IO_BUFFER_BYTES, copy_buffered};
+    use super::{CountingReader, IO_BUFFER_BYTES, copy_buffered, rar_member_output_limit};
 
     #[derive(Default)]
     struct CountingWriter {
@@ -869,5 +888,23 @@ mod tests {
         let mut recovered = [0_u8; 1];
         assert_eq!(limited.read(&mut recovered).unwrap(), 1);
         assert_eq!(recovered[0], 7);
+    }
+
+    #[test]
+    fn rar_output_limit_keeps_exact_unknown_compressed_members_legal() {
+        use unrar_rs::CompressionMethod;
+
+        assert_eq!(
+            rar_member_output_limit(4, None, CompressionMethod::Normal),
+            5
+        );
+        assert_eq!(
+            rar_member_output_limit(4, None, CompressionMethod::Store),
+            4
+        );
+        assert_eq!(
+            rar_member_output_limit(4, Some(4), CompressionMethod::Normal),
+            4
+        );
     }
 }

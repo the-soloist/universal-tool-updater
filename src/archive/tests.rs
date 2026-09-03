@@ -376,6 +376,42 @@ fn interrupts_zip_entries_whose_real_output_exceeds_the_quota() {
 }
 
 #[test]
+fn rejects_pax_size_overrides_before_writing_tar_entries() {
+    let directory = tempdir().unwrap();
+    let archive_path = directory.path().join("pax-size.tar.gz");
+    let output_path = directory.path().join("output");
+    let contents = b"0123456789";
+    let tar = pax_size_tar();
+
+    // The raw file header declares zero bytes while the PAX extension supplies
+    // the effective size. The quota must use the effective value before unpack.
+    let mut parsed = tar::Archive::new(tar.as_slice());
+    let entry = parsed.entries().unwrap().next().unwrap().unwrap();
+    assert_eq!(entry.header().size().unwrap(), 0);
+    assert_eq!(entry.size(), contents.len() as u64);
+    drop(entry);
+    drop(parsed);
+    fs::write(&archive_path, gzip(&tar)).unwrap();
+
+    let service = ArchiveService::with_limits(ExtractionLimits {
+        max_total_bytes: 4,
+        max_entries: 100,
+    });
+    let error = service
+        .extract_for_tool("demo", &archive_path, &output_path, None)
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("max_total_bytes 4"),
+        "expected the effective PAX size to exceed the quota, got {error:#}"
+    );
+    assert!(
+        !output_path.join("tool.txt").exists(),
+        "the oversized PAX entry must be rejected before creating its output file"
+    );
+}
+
+#[test]
 fn interrupts_rar_members_with_unknown_size_at_the_quota() {
     let directory = tempdir().unwrap();
     let archive_path = directory.path().join("unknown.rar");
@@ -521,6 +557,37 @@ fn tar_fixture() -> Vec<u8> {
         archive.append(&header, contents.as_slice()).unwrap();
         archive.finish().unwrap();
     }
+    output
+}
+
+fn pax_size_tar() -> Vec<u8> {
+    const TAR_BLOCK_BYTES: usize = 512;
+
+    let filename = "tool.txt";
+    let contents = b"0123456789";
+    let pax_record = b"11 size=10\n";
+    let mut output = Vec::new();
+
+    let mut pax_header = tar::Header::new_ustar();
+    pax_header.set_path("PaxHeaders/tool.txt").unwrap();
+    pax_header.set_size(pax_record.len() as u64);
+    pax_header.set_mode(0o644);
+    pax_header.set_entry_type(tar::EntryType::XHeader);
+    pax_header.set_cksum();
+    output.extend_from_slice(pax_header.as_bytes());
+    output.extend_from_slice(pax_record);
+    output.resize(output.len().next_multiple_of(TAR_BLOCK_BYTES), 0);
+
+    let mut file_header = tar::Header::new_ustar();
+    file_header.set_path(filename).unwrap();
+    file_header.set_size(0);
+    file_header.set_mode(0o644);
+    file_header.set_entry_type(tar::EntryType::Regular);
+    file_header.set_cksum();
+    output.extend_from_slice(file_header.as_bytes());
+    output.extend_from_slice(contents);
+    output.resize(output.len().next_multiple_of(TAR_BLOCK_BYTES), 0);
+    output.resize(output.len() + TAR_BLOCK_BYTES * 2, 0);
     output
 }
 
