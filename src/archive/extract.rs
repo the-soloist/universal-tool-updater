@@ -452,6 +452,7 @@ fn extract_tar<R: io::Read>(
         path: archive_path.to_path_buf(),
         message: error.to_string(),
     })?;
+    let mut symlinks = Vec::new();
     let destination_root = destination
         .canonicalize()
         .unwrap_or_else(|_| destination.to_path_buf());
@@ -462,17 +463,17 @@ fn extract_tar<R: io::Read>(
         })?;
         let entry_type = entry.header().entry_type();
         if entry_type.is_symlink() || entry_type.is_hard_link() {
-            ensure_link_is_allowed(
+            let symlink = validate_tar_link(
                 archive_path,
                 destination,
                 &destination_root,
                 &mut entry,
                 context,
             )?;
-        }
-        if entry_type.is_symlink() {
-            unpack_tar_symlink(archive_path, destination, &mut entry)?;
-            continue;
+            if let Some(symlink) = symlink {
+                symlinks.push(symlink);
+                continue;
+            }
         }
         let unpacked = entry
             .unpack_in(destination)
@@ -488,53 +489,33 @@ fn extract_tar<R: io::Read>(
             .into());
         }
     }
+    // Windows 创建 symlink 时必须提前指定文件或目录类型，因此等普通条目
+    // 全部落盘后再按最终目标类型建链，避免结果依赖 tar 条目顺序。
+    for symlink in symlinks {
+        create_tar_symlink(destination, &symlink)?;
+    }
     Ok(())
 }
 
+struct PendingTarSymlink {
+    path: PathBuf,
+    target: PathBuf,
+}
+
 /// 自建 tar 符号链接：tar 0.4.46 在 Windows 对所有 symlink 固定
-/// symlink_file，指向目录的链接无法跟随；这里按目标类型选择创建方式。
-/// 目标尚未落盘时无法判定类型，按文件链接创建，因此 Windows 上的
-/// 目录型悬空链接需要目标先存在才能正确建链。
-fn unpack_tar_symlink<R: io::Read>(
-    archive_path: &Path,
-    destination: &Path,
-    entry: &mut tar::Entry<'_, R>,
-) -> Result<()> {
-    let path = entry
-        .path()
-        .map_err(|error| archive_error(archive_path, error))?;
-    let target = entry
-        .link_name()
-        .map_err(|error| archive_error(archive_path, error))?
-        .ok_or_else(|| {
-            archive_error(
-                archive_path,
-                format!("symbolic link {path:?} without a target"),
-            )
-        })?;
-    // 与 unpack_in 的逃逸判定对齐：含绝对分量或 `..` 的条目拒绝解压。
-    if path.components().any(|component| {
-        matches!(
-            component,
-            Component::RootDir | Component::Prefix(_) | Component::ParentDir
-        )
-    }) {
-        return Err(archive_error(
-            archive_path,
-            "archive entry attempted to escape the destination",
-        )
-        .into());
-    }
-    let link = destination.join(path.as_os_str());
+/// symlink_file，指向目录的链接无法跟随；这里在普通条目全部落盘后
+/// 按目标类型选择创建方式。
+fn create_tar_symlink(destination: &Path, symlink: &PendingTarSymlink) -> Result<()> {
+    let link = destination.join(&symlink.path);
     if let Some(parent) = link.parent() {
         fs::create_dir_all(parent)?;
     }
     #[cfg(unix)]
-    std::os::unix::fs::symlink(&target, &link)?;
+    std::os::unix::fs::symlink(&symlink.target, &link)?;
     #[cfg(windows)]
     {
         // NT 路径解析只把反斜杠当分隔符，正斜杠的 tar 目标会让链接无法跟随。
-        let target = PathBuf::from(target.to_string_lossy().replace('/', "\\"));
+        let target = PathBuf::from(symlink.target.to_string_lossy().replace('/', "\\"));
         let resolved = link.parent().unwrap_or(destination).join(&target);
         let target_is_directory = fs::metadata(&resolved).is_ok_and(|metadata| metadata.is_dir());
         if target_is_directory {
@@ -548,17 +529,18 @@ fn unpack_tar_symlink<R: io::Read>(
 
 /// 符号链接与硬链接默认拒绝，与自更新链路的安全基线一致。
 /// opt-in 路径仍要求链接目标为相对路径且解析后位于解压目录内。
-fn ensure_link_is_allowed<R: io::Read>(
+fn validate_tar_link<R: io::Read>(
     archive_path: &Path,
     destination: &Path,
     destination_root: &Path,
     entry: &mut tar::Entry<'_, R>,
     context: &ExtractionContext<'_>,
-) -> Result<()> {
+) -> Result<Option<PendingTarSymlink>> {
     let path = entry
         .path()
         .map_err(|error| archive_error(archive_path, error))?;
-    let kind = if entry.header().entry_type().is_symlink() {
+    let is_symlink = entry.header().entry_type().is_symlink();
+    let kind = if is_symlink {
         "symbolic link"
     } else {
         "hard link"
@@ -589,7 +571,27 @@ fn ensure_link_is_allowed<R: io::Read>(
         kind,
         path.as_ref(),
         target.as_ref(),
-    )
+    )?;
+    if !is_symlink {
+        return Ok(None);
+    }
+    // 自建 symlink 不经过 unpack_in，需在拼接前拒绝不安全的条目路径。
+    if path.components().any(|component| {
+        matches!(
+            component,
+            Component::RootDir | Component::Prefix(_) | Component::ParentDir
+        )
+    }) {
+        return Err(archive_error(
+            archive_path,
+            "archive entry attempted to escape the destination",
+        )
+        .into());
+    }
+    Ok(Some(PendingTarSymlink {
+        path: path.into_owned(),
+        target: target.into_owned(),
+    }))
 }
 
 /// 链接目标必须是相对路径，且与条目位置拼接后仍位于解压目录内。
