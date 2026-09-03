@@ -301,7 +301,7 @@ fn restores_previous_installation_when_post_install_hook_fails() {
         }],
         ..HookConfig::default()
     };
-    let archive_service = ArchiveService;
+    let archive_service = ArchiveService::default();
     let hook_runner = HookRunner;
     let installer = Installer::new(&archive_service, &hook_runner, directory.path(), &toolkit);
     let run = RunWorkspace::create(&downloads, &downloads.join("staging")).unwrap();
