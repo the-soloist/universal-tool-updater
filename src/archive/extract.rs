@@ -470,6 +470,10 @@ fn extract_tar<R: io::Read>(
                 context,
             )?;
         }
+        if entry_type.is_symlink() {
+            unpack_tar_symlink(archive_path, destination, &mut entry)?;
+            continue;
+        }
         let unpacked = entry
             .unpack_in(destination)
             .map_err(|error| UpdaterError::Archive {
@@ -482,6 +486,61 @@ fn extract_tar<R: io::Read>(
                 message: "archive entry attempted to escape the destination".to_owned(),
             }
             .into());
+        }
+    }
+    Ok(())
+}
+
+/// 自建 tar 符号链接：tar 0.4.46 在 Windows 对所有 symlink 固定
+/// symlink_file，指向目录的链接无法跟随；这里按目标类型选择创建方式。
+/// 目标尚未落盘时无法判定类型，按文件链接创建，因此 Windows 上的
+/// 目录型悬空链接需要目标先存在才能正确建链。
+fn unpack_tar_symlink<R: io::Read>(
+    archive_path: &Path,
+    destination: &Path,
+    entry: &mut tar::Entry<'_, R>,
+) -> Result<()> {
+    let path = entry
+        .path()
+        .map_err(|error| archive_error(archive_path, error))?;
+    let target = entry
+        .link_name()
+        .map_err(|error| archive_error(archive_path, error))?
+        .ok_or_else(|| {
+            archive_error(
+                archive_path,
+                format!("symbolic link {path:?} without a target"),
+            )
+        })?;
+    // 与 unpack_in 的逃逸判定对齐：含绝对分量或 `..` 的条目拒绝解压。
+    if path.components().any(|component| {
+        matches!(
+            component,
+            Component::RootDir | Component::Prefix(_) | Component::ParentDir
+        )
+    }) {
+        return Err(archive_error(
+            archive_path,
+            "archive entry attempted to escape the destination",
+        )
+        .into());
+    }
+    let link = destination.join(path.as_os_str());
+    if let Some(parent) = link.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target, &link)?;
+    #[cfg(windows)]
+    {
+        // NT 路径解析只把反斜杠当分隔符，正斜杠的 tar 目标会让链接无法跟随。
+        let target = PathBuf::from(target.to_string_lossy().replace('/', "\\"));
+        let resolved = link.parent().unwrap_or(destination).join(&target);
+        let target_is_directory = fs::metadata(&resolved).is_ok_and(|metadata| metadata.is_dir());
+        if target_is_directory {
+            std::os::windows::fs::symlink_dir(&target, &link)?;
+        } else {
+            std::os::windows::fs::symlink_file(&target, &link)?;
         }
     }
     Ok(())

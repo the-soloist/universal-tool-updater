@@ -346,6 +346,55 @@ fn rejects_absolute_tar_link_targets_even_when_opted_in() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn creates_tar_directory_symlinks_followable_on_windows() {
+    let directory = tempdir().unwrap();
+    let archive_path = directory.path().join("dir-link.tar.gz");
+    fs::write(&archive_path, gzip(&tar_directory_symlink())).unwrap();
+    let output = directory.path().join("output");
+
+    ArchiveService
+        .extract_for_tool("demo", true, &archive_path, &output, None)
+        .unwrap();
+
+    let link = output.join("bin/dir-link");
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    // 文件符号链接指向目录时无法跟随；只有 symlink_dir 能当作目录访问。
+    assert!(link.metadata().unwrap().is_dir());
+    assert_eq!(
+        fs::read_to_string(link.join("data.txt")).unwrap(),
+        "payload"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn creates_tar_directory_symlinks_with_relative_targets_when_opted_in() {
+    let directory = tempdir().unwrap();
+    let archive_path = directory.path().join("dir-link.tar.gz");
+    fs::write(&archive_path, gzip(&tar_directory_symlink())).unwrap();
+    let output = directory.path().join("output");
+
+    ArchiveService
+        .extract_for_tool("demo", true, &archive_path, &output, None)
+        .unwrap();
+
+    assert_eq!(
+        fs::read_link(output.join("bin/dir-link")).unwrap(),
+        Path::new("../share")
+    );
+    assert_eq!(
+        fs::read_to_string(output.join("bin/dir-link/data.txt")).unwrap(),
+        "payload"
+    );
+}
+
 #[test]
 fn rejects_rar_link_members_by_default() {
     let directory = tempdir().unwrap();
@@ -532,6 +581,32 @@ fn tar_link_with_target(entry_type: tar::EntryType, target: &str) -> Vec<u8> {
         header.set_size(0);
         header.set_mode(0o644);
         header.set_link_name(target).unwrap();
+        header.set_cksum();
+        archive.append(&header, std::io::empty()).unwrap();
+        archive.finish().unwrap();
+    }
+    output
+}
+
+/// 手写 tar Header 构造一个普通文件加一个指向目录的符号链接条目。
+fn tar_directory_symlink() -> Vec<u8> {
+    let mut output = Vec::new();
+    {
+        let mut archive = tar::Builder::new(&mut output);
+        let contents = b"payload";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("share/data.txt").unwrap();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        archive.append(&header, contents.as_slice()).unwrap();
+
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_path("bin/dir-link").unwrap();
+        header.set_size(0);
+        header.set_mode(0o644);
+        header.set_link_name("../share").unwrap();
         header.set_cksum();
         archive.append(&header, std::io::empty()).unwrap();
         archive.finish().unwrap();
