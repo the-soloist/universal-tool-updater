@@ -385,12 +385,12 @@ fn rejects_pax_size_overrides_before_writing_tar_entries() {
 
     // The raw file header declares zero bytes while the PAX extension supplies
     // the effective size. The quota must use the effective value before unpack.
-    let mut parsed = tar::Archive::new(tar.as_slice());
-    let entry = parsed.entries().unwrap().next().unwrap().unwrap();
-    assert_eq!(entry.header().size().unwrap(), 0);
-    assert_eq!(entry.size(), contents.len() as u64);
-    drop(entry);
-    drop(parsed);
+    {
+        let mut parsed = tar::Archive::new(tar.as_slice());
+        let entry = parsed.entries().unwrap().next().unwrap().unwrap();
+        assert_eq!(entry.header().size().unwrap(), 0);
+        assert_eq!(entry.size(), contents.len() as u64);
+    }
     fs::write(&archive_path, gzip(&tar)).unwrap();
 
     let service = ArchiveService::with_limits(ExtractionLimits {
