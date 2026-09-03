@@ -58,6 +58,22 @@ pub(super) fn validate_manifest_values(path: &Path, manifest: &ManifestFile) -> 
         .into());
     }
 
+    let limits = &manifest.extraction_limits;
+    if limits.max_total_bytes == 0 {
+        return Err(UpdaterError::config(
+            path,
+            "extraction_limits.max_total_bytes must be greater than zero",
+        )
+        .into());
+    }
+    if limits.max_entries == 0 {
+        return Err(UpdaterError::config(
+            path,
+            "extraction_limits.max_entries must be greater than zero",
+        )
+        .into());
+    }
+
     validate_archive_name(
         path,
         "defaults.install.archive_name",

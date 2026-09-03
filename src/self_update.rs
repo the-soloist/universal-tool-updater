@@ -108,7 +108,7 @@ pub fn run(options: SelfUpdateOptions) -> Result<SelfUpdateOutcome> {
     println!("Verified SHA-256 for {archive_name}");
 
     let extract_dir = work_dir.path().join("extracted");
-    ArchiveService.extract(&archive_path, &extract_dir, None)?;
+    ArchiveService::default().extract(&archive_path, &extract_dir, None)?;
     let candidate = find_candidate(&extract_dir)?;
     prepare_candidate(&candidate)?;
     verify_candidate(&candidate, &release.version)?;
