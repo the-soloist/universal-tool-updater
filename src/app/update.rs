@@ -287,13 +287,13 @@ impl UpdateSession<'_> {
                             ),
                         });
                     }
-                    Err(error) if error.is_invalid() => {
+                    Err(error) if error.is_invalid() || error.is_missing() => {
                         existing_archive = ExistingArchiveStatus::Invalid;
                         tracing::warn!(
                             tool = %tool.id,
                             path = %path.display(),
                             error = %error,
-                            "installed archive is invalid; rebuilding without its contents"
+                            "installed archive is missing or invalid; rebuilding without its contents"
                         );
                     }
                     Err(error) => return Err(error.into()),

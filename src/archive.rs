@@ -201,6 +201,7 @@ impl ArchiveService {
         })();
         result.map_err(|error| ArchiveVerificationError {
             invalid: invalid_7z_contents(&error),
+            missing: missing_7z_contents(&error),
             error: UpdaterError::Archive {
                 path: archive.to_path_buf(),
                 message: format!("7z verification failed: {error}"),
@@ -213,11 +214,16 @@ impl ArchiveService {
 pub(crate) struct ArchiveVerificationError {
     error: UpdaterError,
     invalid: bool,
+    missing: bool,
 }
 
 impl ArchiveVerificationError {
     pub(crate) fn is_invalid(&self) -> bool {
         self.invalid
+    }
+
+    pub(crate) fn is_missing(&self) -> bool {
+        self.missing
     }
 }
 
@@ -254,6 +260,15 @@ fn invalid_7z_contents(error: &sevenz_rust::Error) -> bool {
                     | io::ErrorKind::UnexpectedEof
                     | io::ErrorKind::Other
             )
+    )
+}
+
+fn missing_7z_contents(error: &sevenz_rust::Error) -> bool {
+    use sevenz_rust::Error;
+
+    matches!(
+        error,
+        Error::Io(error, _) if error.kind() == io::ErrorKind::NotFound
     )
 }
 

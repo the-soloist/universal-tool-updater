@@ -149,6 +149,7 @@ fn does_not_classify_a_missing_7z_archive_as_corrupt() {
 
     let error = ArchiveService::default().verify_7z(&archive).unwrap_err();
     assert!(!error.is_invalid());
+    assert!(error.is_missing());
 }
 
 #[test]
