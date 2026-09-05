@@ -1,6 +1,6 @@
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use tracing_subscriber::layer::SubscriberExt;
@@ -67,18 +67,76 @@ fn log_directory(requested: Option<&Path>) -> Result<PathBuf> {
 }
 
 fn log_filename() -> Result<String> {
-    let timestamp = SystemTime::now()
+    let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .context("system clock is earlier than the Unix epoch")?
-        .as_millis();
+        .context("system clock is earlier than the Unix epoch")?;
+    let timestamp = format_timestamp(elapsed)?;
     Ok(format!("updater-{timestamp}-{}.log", std::process::id()))
+}
+
+/// Formats a UTC timestamp without path separators or characters forbidden in
+/// Windows filenames. The resulting form remains lexicographically sortable.
+fn format_timestamp(elapsed: Duration) -> Result<String> {
+    let total_seconds = elapsed.as_secs();
+    let days = i64::try_from(total_seconds / 86_400)
+        .context("Unix timestamp is too far in the future to format")?;
+    let seconds_of_day = total_seconds % 86_400;
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    let milliseconds = elapsed.subsec_millis();
+    let (year, month, day) = civil_from_days(days);
+
+    Ok(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}-{minute:02}-{second:02}.{milliseconds:03}Z"
+    ))
+}
+
+// Converts days since 1970-01-01 to a Gregorian date (UTC).
+// This is the civil date algorithm from Howard Hinnant's public-domain work.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let shifted = days + 719_468;
+    let era = if shifted >= 0 {
+        shifted / 146_097
+    } else {
+        (shifted - 146_096) / 146_097
+    };
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_part = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_part + 2) / 5 + 1;
+    let month = month_part + if month_part < 10 { 3 } else { -9 };
+    let year = year + if month <= 2 { 1 } else { 0 };
+    (year, month as u32, day as u32)
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
-    use super::{display_name, log_directory};
+    use std::time::Duration;
+
+    use super::{civil_from_days, display_name, format_timestamp, log_directory};
+
+    #[test]
+    fn formats_log_timestamp_as_a_sortable_utc_filename_component() {
+        assert_eq!(
+            format_timestamp(Duration::from_millis(0)).unwrap(),
+            "1970-01-01T00-00-00.000Z"
+        );
+        assert_eq!(
+            format_timestamp(Duration::from_millis(1_704_067_200_123)).unwrap(),
+            "2024-01-01T00-00-00.123Z"
+        );
+    }
+
+    #[test]
+    fn converts_leap_day_dates_correctly() {
+        assert_eq!(civil_from_days(18_321), (2020, 2, 29));
+    }
 
     #[test]
     fn displays_only_the_path_filename() {
