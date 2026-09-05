@@ -238,7 +238,7 @@ profile › tool  filename (index/total)  progress  size  eta
 export GITHUB_TOKEN=github_pat_xxx
 ```
 
-环境变量名称由 `network.github_token_env` 配置，默认是 `GITHUB_TOKEN`。
+令牌来源由 `network.github_token_source` 配置，支持 `env:变量名` 或 `gh auth token`；默认是 `env:GITHUB_TOKEN`。
 
 ## Hook
 

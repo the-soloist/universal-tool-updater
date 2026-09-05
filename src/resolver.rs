@@ -3,6 +3,8 @@ mod http;
 mod util;
 mod web;
 
+use std::process::Command;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -10,7 +12,9 @@ use reqwest::blocking::Client;
 use reqwest::redirect;
 use url::Url;
 
-use crate::domain::{NetworkConfig, ReleaseConfig, ResolvedRelease, Tool};
+use crate::domain::{GithubTokenSource, NetworkConfig, ReleaseConfig, ResolvedRelease, Tool};
+
+static GH_AUTH_TOKEN: OnceLock<std::result::Result<Option<String>, String>> = OnceLock::new();
 
 pub struct Resolver {
     client: Client,
@@ -34,9 +38,7 @@ impl Resolver {
             .redirect(transport_policy(allow_insecure_transports))
             .build()
             .context("cannot create HTTP client")?;
-        let github_token = std::env::var(&settings.github_token_env)
-            .ok()
-            .filter(|token| !token.trim().is_empty());
+        let github_token = github_token(&settings.github_token_source)?;
         Ok(Self {
             client,
             github_token,
@@ -84,6 +86,45 @@ impl Resolver {
             )),
         }
     }
+}
+
+fn github_token(source: &str) -> Result<Option<String>> {
+    let source = GithubTokenSource::parse(source)
+        .map_err(|message| anyhow::anyhow!("invalid network.github_token_source: {message}"))?;
+    match source {
+        GithubTokenSource::Environment(name) => Ok(std::env::var(name)
+            .ok()
+            .filter(|token| !token.trim().is_empty())),
+        GithubTokenSource::GhAuthToken => gh_auth_token(),
+    }
+}
+
+fn gh_auth_token() -> Result<Option<String>> {
+    GH_AUTH_TOKEN
+        .get_or_init(|| {
+            let output = Command::new("gh")
+                .args(["auth", "token"])
+                .output()
+                .map_err(|error| format!("cannot execute `gh auth token`: {error}"))?;
+            if !output.status.success() {
+                let status = output.status.code().map_or_else(
+                    || "terminated by signal".to_owned(),
+                    |code| code.to_string(),
+                );
+                return Err(format!(
+                    "`gh auth token` failed ({status}); run `gh auth login` first"
+                ));
+            }
+            let token = String::from_utf8(output.stdout)
+                .map_err(|_| "`gh auth token` returned invalid UTF-8".to_owned())?;
+            let token = token.trim();
+            if token.is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(token.to_owned()))
+        })
+        .clone()
+        .map_err(anyhow::Error::msg)
 }
 
 /// 共享 client 的重定向策略：默认拒绝 HTTPS→HTTP 降级，opt-in 后放行；

@@ -54,7 +54,7 @@ network:
   user_agent: Universal-Tool-Updater/3
   timeout_seconds: 60
   progress: true
-  github_token_env: GITHUB_TOKEN
+  github_token_source: env:GITHUB_TOKEN
   jobs: 4
 
 defaults:
@@ -98,10 +98,10 @@ defaults:
 | `user_agent` | string | `Universal-Tool-Updater/3` | 非空且必须是合法 HTTP Header 值。 |
 | `timeout_seconds` | integer | `60` | 必须大于 `0`。 |
 | `progress` | boolean | `true` | 是否显示下载进度。 |
-| `github_token_env` | string | `GITHUB_TOKEN` | 保存环境变量名，不保存 token；格式为 `[A-Za-z_][A-Za-z0-9_]*`。 |
+| `github_token_source` | string | `env:GITHUB_TOKEN` | GitHub token 来源：`env:变量名` 从环境变量读取，或使用 `gh auth token` 调用 GitHub CLI；不会把 token 写入 YAML。 |
 | `jobs` | integer | `4` | 同时执行的完整工具更新任务数，必须大于 `0`。 |
 
-命令行 `updater update --jobs N` 会覆盖 `network.jobs`。GitHub token 应通过 `github_token_env` 指定的环境变量注入，不要直接写入 YAML。
+命令行 `updater update --jobs N` 会覆盖 `network.jobs`。使用 `env:变量名` 时，GitHub token 通过对应环境变量注入；使用 `gh auth token` 时，更新器会直接调用 GitHub CLI。不要直接把 token 写入 YAML。
 
 ### 2.4 defaults
 

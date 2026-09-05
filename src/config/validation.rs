@@ -9,7 +9,9 @@ use regex::Regex;
 use reqwest::header::HeaderValue;
 
 use crate::config::model::{InstallConfig, ManifestFile, ToolConfig};
-use crate::domain::{ArtifactConfig, InputMode, InstallSpec, OutputMode, effective_output_mode};
+use crate::domain::{
+    ArtifactConfig, GithubTokenSource, InputMode, InstallSpec, OutputMode, effective_output_mode,
+};
 use crate::error::UpdaterError;
 use crate::paths::{is_portable_filename, is_portable_relative_path};
 
@@ -50,12 +52,10 @@ pub(super) fn validate_manifest_values(path: &Path, manifest: &ManifestFile) -> 
     if network.jobs == 0 {
         return Err(UpdaterError::config(path, "network.jobs must be greater than zero").into());
     }
-    if !is_portable_environment_name(&network.github_token_env) {
-        return Err(UpdaterError::config(
-            path,
-            "network.github_token_env must be a portable environment variable name",
-        )
-        .into());
+    if let Err(message) = GithubTokenSource::parse(&network.github_token_source) {
+        return Err(
+            UpdaterError::config(path, format!("network.github_token_source {message}")).into(),
+        );
     }
 
     let limits = &manifest.extraction_limits;
@@ -265,14 +265,6 @@ pub(super) fn validate_placeholders(
         }
         remaining = &after_open[close + 1..];
     }
-}
-
-fn is_portable_environment_name(value: &str) -> bool {
-    let mut characters = value.chars();
-    characters
-        .next()
-        .is_some_and(|character| character == '_' || character.is_ascii_alphabetic())
-        && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
 fn validate_install_config(path: &Path, id: &str, install: &InstallConfig) -> Result<()> {

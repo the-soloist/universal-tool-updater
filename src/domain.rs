@@ -5,13 +5,45 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) const VERSION_FILE: &str = ".version";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GithubTokenSource {
+    Environment(String),
+    GhAuthToken,
+}
+
+impl GithubTokenSource {
+    pub(crate) fn parse(value: &str) -> Result<Self, String> {
+        if let Some(name) = value.strip_prefix("env:") {
+            if is_portable_environment_name(name) {
+                return Ok(Self::Environment(name.to_owned()));
+            }
+            return Err(
+                "must use env:<name>, where <name> is a portable environment variable name"
+                    .to_owned(),
+            );
+        }
+        if value == "gh auth token" {
+            return Ok(Self::GhAuthToken);
+        }
+        Err("must be env:<name> or 'gh auth token'".to_owned())
+    }
+}
+
+fn is_portable_environment_name(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|character| character == '_' || character.is_ascii_alphabetic())
+        && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct NetworkConfig {
     pub user_agent: String,
     pub timeout_seconds: u64,
     pub progress: bool,
-    pub github_token_env: String,
+    pub github_token_source: String,
     pub jobs: usize,
 }
 
@@ -21,7 +53,7 @@ impl Default for NetworkConfig {
             user_agent: "Universal-Tool-Updater/3".to_owned(),
             timeout_seconds: 60,
             progress: true,
-            github_token_env: "GITHUB_TOKEN".to_owned(),
+            github_token_source: "env:GITHUB_TOKEN".to_owned(),
             jobs: 4,
         }
     }
@@ -289,4 +321,31 @@ pub struct UpdateResult {
 #[derive(Debug, Clone)]
 pub struct DownloadedArtifact {
     pub path: PathBuf,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GithubTokenSource;
+
+    #[test]
+    fn parses_environment_token_sources() {
+        assert_eq!(
+            GithubTokenSource::parse("env:GITHUB_TOKEN"),
+            Ok(GithubTokenSource::Environment("GITHUB_TOKEN".to_owned()))
+        );
+    }
+
+    #[test]
+    fn parses_gh_cli_token_source() {
+        assert_eq!(
+            GithubTokenSource::parse("gh auth token"),
+            Ok(GithubTokenSource::GhAuthToken)
+        );
+    }
+
+    #[test]
+    fn rejects_ambiguous_token_sources() {
+        assert!(GithubTokenSource::parse("GITHUB_TOKEN").is_err());
+        assert!(GithubTokenSource::parse("env:token-name").is_err());
+    }
 }
