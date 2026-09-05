@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -43,6 +44,20 @@ pub(crate) fn display_name(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "<unknown>".to_owned())
+}
+
+/// Preserves the complete argument vector for the startup log, including the
+/// executable path that may be useful when several updater builds coexist.
+pub(crate) fn format_command_line<I, A>(arguments: I) -> String
+where
+    I: IntoIterator<Item = A>,
+    A: AsRef<OsStr>,
+{
+    arguments
+        .into_iter()
+        .map(|argument| argument.as_ref().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn log_directory(requested: Option<&Path>) -> Result<PathBuf> {
@@ -119,7 +134,24 @@ mod tests {
 
     use std::time::Duration;
 
-    use super::{civil_from_days, display_name, format_timestamp, log_directory};
+    use super::{
+        civil_from_days, display_name, format_command_line, format_timestamp, log_directory,
+    };
+
+    #[test]
+    fn preserves_the_complete_startup_command() {
+        let command = format_command_line([
+            "/opt/toolkit/updater",
+            "--profiles",
+            "profiles with spaces",
+            "update",
+            "frida",
+        ]);
+        assert_eq!(
+            command,
+            "/opt/toolkit/updater --profiles profiles with spaces update frida"
+        );
+    }
 
     #[test]
     fn formats_log_timestamp_as_a_sortable_utc_filename_component() {
