@@ -139,6 +139,7 @@ pub(super) fn update_tools(
                                 message: format!("{error:#}"),
                             },
                         });
+                    task_progress.finish(progress_status(update.result.status));
                     if sender
                         .send(TaskOutcome {
                             index,
@@ -251,6 +252,12 @@ impl UpdateSession<'_> {
             )));
         }
 
+        tracing::debug!(
+            tool = %tool.id,
+            profile = %tool.profile,
+            destination = %tool.install.destination.display(),
+            "starting tool update"
+        );
         progress.stage("resolve");
         let resolver =
             Resolver::with_insecure_transports(self.network, tool.allow_insecure_transports)?;
@@ -259,6 +266,12 @@ impl UpdateSession<'_> {
             self.config.extraction_limits.max_total_bytes,
         );
         let release = resolver.resolve(tool)?;
+        tracing::debug!(
+            tool = %tool.id,
+            version = %release.version,
+            artifacts = release.artifacts.len(),
+            "release resolved"
+        );
         let recorded_version_matches =
             self.state_versions.get(&tool.id).map(String::as_str) == Some(release.version.as_str());
         if !self.options.force && recorded_version_matches {
@@ -357,6 +370,12 @@ impl UpdateSession<'_> {
                 )
             })
             .collect::<Result<Vec<_>>>()?;
+        tracing::debug!(
+            tool = %tool.id,
+            version = %release.version,
+            artifacts = downloaded.len(),
+            "release artifacts downloaded"
+        );
         self.installer.install(
             tool,
             &release.version,
@@ -365,6 +384,7 @@ impl UpdateSession<'_> {
             progress,
             InstallOptions::new(self.compression_threads, existing_archive),
         )?;
+        tracing::debug!(tool = %tool.id, version = %release.version, "tool installation committed");
         workspace.clear_partials()?;
         workspace.clear_downloads()?;
         Ok(ToolUpdate::new(result(
@@ -418,9 +438,21 @@ fn result(tool: &Tool, status: UpdateStatus, version: Option<&str>, message: &st
     }
 }
 
+fn progress_status(status: UpdateStatus) -> &'static str {
+    match status {
+        UpdateStatus::Updated => "updated",
+        UpdateStatus::Current => "current",
+        UpdateStatus::Skipped => "skipped",
+        UpdateStatus::Failed => "failed",
+        UpdateStatus::Planned => "planned",
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{compression_threads, effective_jobs};
+    use crate::domain::UpdateStatus;
+
+    use super::{compression_threads, effective_jobs, progress_status};
 
     #[test]
     fn bounds_workers_by_configuration_and_selection_size() {
@@ -434,5 +466,14 @@ mod tests {
     #[test]
     fn always_assigns_at_least_one_compression_thread() {
         assert!(compression_threads(usize::MAX) >= 1);
+    }
+
+    #[test]
+    fn maps_update_statuses_to_progress_messages() {
+        assert_eq!(progress_status(UpdateStatus::Updated), "updated");
+        assert_eq!(progress_status(UpdateStatus::Current), "current");
+        assert_eq!(progress_status(UpdateStatus::Skipped), "skipped");
+        assert_eq!(progress_status(UpdateStatus::Failed), "failed");
+        assert_eq!(progress_status(UpdateStatus::Planned), "planned");
     }
 }

@@ -92,9 +92,12 @@ fn github_token(source: &str) -> Result<Option<String>> {
     let source = GithubTokenSource::parse(source)
         .map_err(|message| anyhow::anyhow!("invalid network.github_token_source: {message}"))?;
     match source {
-        GithubTokenSource::Environment(name) => Ok(std::env::var(name)
-            .ok()
-            .filter(|token| !token.trim().is_empty())),
+        GithubTokenSource::Environment(name) => {
+            tracing::debug!(environment = %name, "reading GitHub token from environment");
+            Ok(std::env::var(name)
+                .ok()
+                .filter(|token| !token.trim().is_empty()))
+        }
         GithubTokenSource::GhAuthToken => gh_auth_token(),
     }
 }
@@ -102,6 +105,7 @@ fn github_token(source: &str) -> Result<Option<String>> {
 fn gh_auth_token() -> Result<Option<String>> {
     GH_AUTH_TOKEN
         .get_or_init(|| {
+            tracing::debug!("reading GitHub token with `gh auth token`");
             let output = Command::new("gh")
                 .args(["auth", "token"])
                 .output()

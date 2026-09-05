@@ -52,7 +52,7 @@ fn list_sort_key(profile: &str, name: &str, id: &str) -> (String, String, String
 
 pub(super) fn print_summary(results: &[UpdateResult]) {
     for result in results {
-        tracing::debug!(
+        tracing::info!(
             tool = %result.tool_id,
             status = status_name(result.status),
             version = %sanitize_control_chars(result.version.as_deref().unwrap_or("-")),

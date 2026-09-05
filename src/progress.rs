@@ -149,6 +149,13 @@ impl TaskProgress {
         self.bar.set_message(stage.to_owned());
     }
 
+    pub(crate) fn finish(&self, status: &str) {
+        self.determinate.set(false);
+        self.bar.unset_length();
+        self.bar.set_style(self.spinner_style.clone());
+        self.bar.finish_with_message(status.to_owned());
+    }
+
     pub(crate) fn download(
         &self,
         artifact: usize,
