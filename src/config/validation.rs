@@ -87,7 +87,7 @@ pub(super) fn validate_tool_config(
     id: &str,
     tool: &ToolConfig,
     app_root: &Path,
-    allow_insecure_transports: bool,
+    _allow_insecure_transports: bool,
 ) -> Result<()> {
     validate_id(path, id)?;
     if let Some(name) = &tool.name {
@@ -111,13 +111,13 @@ pub(super) fn validate_tool_config(
             .into());
         }
     }
-    release::validate(path, id, &tool.release, allow_insecure_transports)?;
+    release::validate(path, id, &tool.release, tool.allow_insecure_transports)?;
     release::validate_artifacts(
         path,
         id,
         &tool.release,
         &tool.artifacts,
-        allow_insecure_transports,
+        tool.allow_insecure_transports,
     )?;
     hooks::validate(path, id, &tool.hooks, app_root)?;
     validate_install_config(path, id, &tool.install)

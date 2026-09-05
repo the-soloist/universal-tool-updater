@@ -76,6 +76,7 @@ pub(super) fn convert_tool(
     Ok(ToolConfig {
         name: Some(name.to_owned()),
         enabled: true,
+        allow_insecure_transports: false,
         release,
         artifacts,
         install,

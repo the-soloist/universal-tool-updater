@@ -95,9 +95,9 @@ from = "web"
 
     let loaded = config::load(&output.join("manifest.yaml")).unwrap();
     assert_eq!(loaded.tools.len(), 1);
-    assert!(loaded.allow_insecure_transports);
-    let manifest = fs::read_to_string(output.join("manifest.yaml")).unwrap();
-    assert!(manifest.contains("allow_insecure_transports: true"));
+    assert!(loaded.tools["demo"].allow_insecure_transports);
+    let profile = fs::read_to_string(output.join("tools.yaml")).unwrap();
+    assert!(profile.contains("allow_insecure_transports: true"));
 }
 
 #[test]
@@ -123,7 +123,7 @@ from = "web"
 
     let loaded = config::load(&output.join("manifest.yaml")).unwrap();
     assert_eq!(loaded.tools.len(), 1);
-    assert!(!loaded.allow_insecure_transports);
+    assert!(!loaded.tools["demo"].allow_insecure_transports);
     let manifest = fs::read_to_string(output.join("manifest.yaml")).unwrap();
     assert!(!manifest.contains("allow_insecure_transports"));
 }

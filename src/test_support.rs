@@ -10,6 +10,7 @@ pub(crate) fn tool(id: &str, destination: impl Into<PathBuf>) -> Tool {
         name: id.to_owned(),
         profile: "test".to_owned(),
         enabled: true,
+        allow_insecure_transports: false,
         release: ReleaseConfig::Github {
             repository: format!("owner/{id}"),
             ignore_versions: Vec::new(),

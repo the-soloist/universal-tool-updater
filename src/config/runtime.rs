@@ -9,8 +9,6 @@ pub struct AppConfig {
     pub app_root: PathBuf,
     pub paths: Paths,
     pub network: NetworkConfig,
-    /// Permits plain-HTTP sources end to end; HTTPS remains the only default.
-    pub allow_insecure_transports: bool,
     pub extraction_limits: ExtractionLimits,
     pub tools: BTreeMap<String, Tool>,
 }

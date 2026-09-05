@@ -17,9 +17,6 @@ pub struct ManifestFile {
     pub schema_version: u32,
     pub include: Vec<String>,
     pub paths: PathConfig,
-    /// Permits plain-HTTP download URLs; HTTPS remains the only default.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub allow_insecure_transports: bool,
     #[serde(default)]
     pub network: NetworkConfig,
     #[serde(default)]
@@ -102,6 +99,9 @@ pub struct ToolConfig {
     pub name: Option<String>,
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
+    /// Permits plain-HTTP URLs for this tool only.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_insecure_transports: bool,
     pub release: ReleaseConfig,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<ArtifactConfig>,
@@ -157,7 +157,7 @@ pub struct SymlinkConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::ManifestFile;
+    use super::{ManifestFile, ToolConfig};
 
     const MINIMAL: &str = "
 schema_version: 5
@@ -169,7 +169,11 @@ paths:
     #[test]
     fn manifest_defaults_the_transport_flag_to_false_and_omits_it() {
         let manifest: ManifestFile = yaml_serde::from_str(MINIMAL).unwrap();
-        assert!(!manifest.allow_insecure_transports);
+        assert!(
+            !yaml_serde::to_string(&manifest)
+                .unwrap()
+                .contains("allow_insecure_transports")
+        );
         assert!(
             !yaml_serde::to_string(&manifest)
                 .unwrap()
@@ -179,11 +183,10 @@ paths:
 
     #[test]
     fn manifest_round_trips_an_explicit_transport_opt_in() {
-        let manifest: ManifestFile =
-            yaml_serde::from_str(&format!("{MINIMAL}allow_insecure_transports: true\n")).unwrap();
-        assert!(manifest.allow_insecure_transports);
+        let tool: ToolConfig = yaml_serde::from_str("name: demo\nenabled: true\nallow_insecure_transports: true\nrelease: { type: manual }\ninstall: { destination: Tools/demo }\n").unwrap();
+        assert!(tool.allow_insecure_transports);
         assert!(
-            yaml_serde::to_string(&manifest)
+            yaml_serde::to_string(&tool)
                 .unwrap()
                 .contains("allow_insecure_transports: true")
         );

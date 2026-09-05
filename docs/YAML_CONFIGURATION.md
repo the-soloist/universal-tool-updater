@@ -74,7 +74,6 @@ defaults:
 | `schema_version` | 是 | 必须为 `5`。 |
 | `include` | 是 | 非空的 profile 文件列表。 |
 | `paths` | 是 | 全局路径配置。 |
-| `allow_insecure_transports` | 否 | 默认 `false`，所有下载 URL 必须使用 HTTPS。显式设为 `true` 才允许 HTTP 明文源。该约束同样作用于页面抓取产物链接与下载重定向（HTTPS→HTTP 降级默认拒绝）。明文传输内容可被中间人篡改（如局域网 ARP 投毒替换工具二进制），建议仅对可信内网源开启。旧版 TOML 迁移遇到明文源时会自动写入 `true` 并输出警告。 |
 | `network` | 否 | 网络和并发配置；省略时使用默认值。 |
 | `defaults` | 否 | 工具安装默认值；工具自身的同名字段优先。 |
 | `extraction_limits` | 否 | 解压与下载配额；省略时使用默认值（见 2.5）。 |
@@ -151,6 +150,7 @@ tools:
 | --- | --- | --- | --- |
 | `name` | 否 | 工具 ID | 展示名，也可用于压缩包名称模板。 |
 | `enabled` | 否 | `true` | 为 `false` 时更新结果为 skipped。 |
+| `allow_insecure_transports` | 否 | `false` | 仅允许当前工具使用 HTTP；省略时该工具只能使用 HTTPS。 |
 | `release` | 是 | 无 | 版本来源，只能选择一种类型；`manual` 表示工具由用户手动维护。 |
 | `artifacts` | 自动更新工具必填 | manual 工具为空 | 下载产物列表；自动更新工具不能为空，manual 工具不得配置。 |
 | `install` | 是 | 无 | 安装目标和处理策略。 |
@@ -207,7 +207,7 @@ release:
     - 1.2.0-beta
 ```
 
-- `url` 必须是带主机名的 HTTPS URL；仅当 manifest 顶层设置 `allow_insecure_transports: true` 时才允许 HTTP。
+- `url` 必须是带主机名的 HTTPS URL；仅当当前工具设置 `allow_insecure_transports: true` 时才允许 HTTP。
 - `version_pattern` 是 Rust 正则表达式，必须至少包含一个捕获组；第一个捕获组就是版本号。
 - 避免使用正则 look-around 或反向引用，因为 Rust `regex` 不支持这些特性。
 
@@ -223,7 +223,7 @@ release:
     - content-length
 ```
 
-HTTP 类型会对 URL 发起 HEAD 请求，按顺序找到第一个存在的 `version_headers`，并对该 header 值计算稳定摘要作为版本号。列表不能为空，header 名称必须合法且不区分大小写地唯一。`url` 必须是带主机名的 HTTPS URL；仅当 manifest 顶层设置 `allow_insecure_transports: true` 时才允许 HTTP。
+HTTP 类型会对 URL 发起 HEAD 请求，按顺序找到第一个存在的 `version_headers`，并对该 header 值计算稳定摘要作为版本号。列表不能为空，header 名称必须合法且不区分大小写地唯一。`url` 必须是带主机名的 HTTPS URL；仅当当前工具设置 `allow_insecure_transports: true` 时才允许 HTTP。
 
 ### 4.4 手动维护
 
@@ -318,7 +318,7 @@ artifacts:
     url: 'https://example.com/releases/{version}/tool-{version}.zip'
 ```
 
-`url-template` 必须包含 `{version}`，且不允许其他占位符。所有 URL（含 `page-link` 的 `base_url`）都必须是带主机名的 HTTPS URL；仅当 manifest 顶层设置 `allow_insecure_transports: true` 时才允许 HTTP。
+`url-template` 必须包含 `{version}`，且不允许其他占位符。所有 URL（含 `page-link` 的 `base_url`）都必须是带主机名的 HTTPS URL；仅当当前工具设置 `allow_insecure_transports: true` 时才允许 HTTP。
 
 HTTP release 的原始文件可以写为：
 

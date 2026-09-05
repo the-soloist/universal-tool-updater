@@ -27,6 +27,7 @@ pub(super) fn materialize(
         id,
         profile,
         enabled: raw.enabled,
+        allow_insecure_transports: raw.allow_insecure_transports,
         release: raw.release,
         artifacts: raw.artifacts,
         install,

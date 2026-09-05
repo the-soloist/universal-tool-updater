@@ -1281,7 +1281,6 @@ schema_version: 5
 include: [tools.yaml]
 paths:
   toolkit_root: Toolkit
-allow_insecure_transports: true
 "#,
     )
     .unwrap();
@@ -1290,6 +1289,7 @@ allow_insecure_transports: true
         r#"
 tools:
   demo:
+    allow_insecure_transports: true
     release:
       type: web
       url: http://example.com/releases
@@ -1305,6 +1305,7 @@ tools:
     install:
       destination: Demo
   runtime:
+    allow_insecure_transports: true
     release:
       type: http
       url: http://example.com/runtime.zip
@@ -1323,19 +1324,16 @@ tools:
 
 #[test]
 fn allows_https_urls_with_and_without_the_insecure_opt_in() {
-    for insecure in [false, true] {
+    for _insecure in [false, true] {
         let directory = tempdir().unwrap();
         fs::write(
             directory.path().join("manifest.yaml"),
-            format!(
-                r#"
+            r#"
 schema_version: 5
 include: [tools.yaml]
 paths:
   toolkit_root: Toolkit
-allow_insecure_transports: {insecure}
 "#,
-            ),
         )
         .unwrap();
         fs::write(
@@ -1363,25 +1361,25 @@ tools:
 
 #[test]
 fn parses_the_insecure_transport_opt_in_and_defaults_to_false() {
-    for (flag_text, expected) in [("", false), ("allow_insecure_transports: true\n", true)] {
+    for (flag_text, expected) in [("", false), ("    allow_insecure_transports: true\n", true)] {
         let directory = tempdir().unwrap();
         fs::write(
             directory.path().join("manifest.yaml"),
-            format!(
-                r#"
+            r#"
 schema_version: 5
 include: [tools.yaml]
 paths:
   toolkit_root: Toolkit
-{flag_text}"#
-            ),
+"#,
         )
         .unwrap();
         fs::write(
             directory.path().join("tools.yaml"),
-            r#"
+            format!(
+                r#"
 tools:
   demo:
+{flag_text}
     release:
       type: web
       url: https://example.com/releases
@@ -1391,27 +1389,26 @@ tools:
         url: https://example.com/demo.zip
     install:
       destination: Demo
-"#,
+"#
+            ),
         )
         .unwrap();
 
         let loaded = config::load(&directory.path().join("manifest.yaml")).unwrap();
-        assert_eq!(loaded.allow_insecure_transports, expected);
+        assert_eq!(loaded.tools["demo"].allow_insecure_transports, expected);
     }
 }
 
 #[test]
 fn rejects_non_boolean_allow_insecure_transports() {
-    assert_invalid_manifest(
-        r#"
-schema_version: 5
-include: [tools.yaml]
-paths:
-  toolkit_root: Toolkit
-allow_insecure_transports: banana
-"#,
-        "invalid type",
-    );
+    let directory = tempdir().unwrap();
+    fs::write(
+        directory.path().join("manifest.yaml"),
+        "schema_version: 5\ninclude: [tools.yaml]\npaths: { toolkit_root: Toolkit }\n",
+    )
+    .unwrap();
+    fs::write(directory.path().join("tools.yaml"), "tools:\n  demo:\n    allow_insecure_transports: banana\n    release: { type: manual }\n    install: { destination: Demo }\n").unwrap();
+    assert!(config::load(&directory.path().join("manifest.yaml")).is_err());
 }
 
 #[test]
@@ -1425,7 +1422,6 @@ fn manifest_file_remains_constructible_with_its_public_fields() {
             staging: None,
             state: PathBuf::from(".updater/state.yaml"),
         },
-        allow_insecure_transports: false,
         network: NetworkConfig::default(),
         defaults: DefaultsConfig::default(),
         extraction_limits: ExtractionLimits::default(),

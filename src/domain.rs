@@ -232,6 +232,7 @@ pub struct Tool {
     pub name: String,
     pub profile: String,
     pub enabled: bool,
+    pub allow_insecure_transports: bool,
     pub release: ReleaseConfig,
     pub artifacts: Vec<ArtifactConfig>,
     pub install: InstallSpec,

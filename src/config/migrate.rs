@@ -79,7 +79,12 @@ pub fn migrate_directory(input: &Path, output: &Path) -> Result<()> {
         .filter(|(_, tool)| tool_uses_plain_http(tool))
         .map(|(id, _)| id.clone())
         .collect();
-    let allow_insecure_transports = !insecure_tools.is_empty();
+    for (_, tool) in converted
+        .iter_mut()
+        .flat_map(|(_, file)| file.tools.iter_mut())
+    {
+        tool.allow_insecure_transports = tool_uses_plain_http(tool);
+    }
 
     for (path, file) in converted {
         write_yaml_atomic(&path, &file)?;
@@ -95,14 +100,13 @@ pub fn migrate_directory(input: &Path, output: &Path) -> Result<()> {
         },
         network: NetworkConfig::default(),
         defaults: DefaultsConfig::default(),
-        allow_insecure_transports,
         extraction_limits: ExtractionLimits::default(),
     };
     write_yaml_atomic(&output.join("manifest.yaml"), &manifest)?;
-    if allow_insecure_transports {
+    if !insecure_tools.is_empty() {
         eprintln!(
             "warning: legacy tools use plaintext HTTP sources: {}; \
-             the migrated manifest sets allow_insecure_transports: true so it stays loadable; \
+             each affected tool is marked allow_insecure_transports: true; \
              migrate these tools to HTTPS and remove the flag when possible",
             insecure_tools.join(", ")
         );

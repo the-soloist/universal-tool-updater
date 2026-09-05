@@ -71,12 +71,6 @@ pub(super) fn update_tools(
                 .map(|archive| (tool.id.clone(), archive.clone()))
         })
         .collect::<BTreeMap<_, _>>();
-    let resolver =
-        Resolver::with_insecure_transports(&config.network, config.allow_insecure_transports)?;
-    let downloader = Downloader::new(
-        resolver.client().clone(),
-        config.extraction_limits.max_total_bytes,
-    );
     let workspace = if options.dry_run {
         None
     } else {
@@ -102,8 +96,7 @@ pub(super) fn update_tools(
     );
     let session = UpdateSession {
         config,
-        resolver: &resolver,
-        downloader: &downloader,
+        network: &config.network,
         archive: &archive,
         installer: &installer,
         hooks: &hooks,
@@ -215,8 +208,7 @@ pub(super) fn update_tools(
 
 struct UpdateSession<'a> {
     config: &'a AppConfig,
-    resolver: &'a Resolver,
-    downloader: &'a Downloader,
+    network: &'a crate::domain::NetworkConfig,
     archive: &'a ArchiveService,
     installer: &'a Installer<'a>,
     hooks: &'a HookRunner,
@@ -260,7 +252,13 @@ impl UpdateSession<'_> {
         }
 
         progress.stage("resolve");
-        let release = self.resolver.resolve(tool)?;
+        let resolver =
+            Resolver::with_insecure_transports(self.network, tool.allow_insecure_transports)?;
+        let downloader = Downloader::new(
+            resolver.client().clone(),
+            self.config.extraction_limits.max_total_bytes,
+        );
+        let release = resolver.resolve(tool)?;
         let recorded_version_matches =
             self.state_versions.get(&tool.id).map(String::as_str) == Some(release.version.as_str());
         if !self.options.force && recorded_version_matches {
@@ -349,7 +347,7 @@ impl UpdateSession<'_> {
             .iter()
             .enumerate()
             .map(|(index, artifact)| {
-                self.downloader.download(
+                downloader.download(
                     tool,
                     &release.version,
                     artifact,
