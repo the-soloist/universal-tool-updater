@@ -101,9 +101,31 @@ include: [tools.yaml]
 paths:
   toolkit_root: Toolkit
 network:
-  github_token_env: GITHUB-TOKEN
+  github_token_source: env:GITHUB-TOKEN
 "#,
-            "network.github_token_env must be a portable environment variable name",
+            "network.github_token_source must use env:<name>, where <name> is a portable environment variable name",
+        ),
+        (
+            r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+network:
+  github_token_source: GITHUB_TOKEN
+"#,
+            "network.github_token_source must be env:<name> or 'gh auth token'",
+        ),
+        (
+            r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+network:
+  github_token_env: GITHUB_TOKEN
+"#,
+            "unknown field `github_token_env`",
         ),
         (
             r#"
@@ -132,6 +154,42 @@ defaults:
         ),
     ] {
         assert_invalid_manifest(manifest, expected);
+    }
+}
+
+#[test]
+fn loads_supported_github_token_sources_without_resolving_credentials() {
+    for source in ["env:UPDATER_TEST_TOKEN", "gh auth token"] {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("manifest.yaml"),
+            format!(
+                r#"
+schema_version: 5
+include: [tools.yaml]
+paths:
+  toolkit_root: Toolkit
+network:
+  github_token_source: '{source}'
+"#
+            ),
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("tools.yaml"),
+            r#"
+tools:
+  demo:
+    release:
+      type: manual
+    install:
+      destination: Demo
+"#,
+        )
+        .unwrap();
+
+        let loaded = config::load(&directory.path().join("manifest.yaml")).unwrap();
+        assert_eq!(loaded.network.github_token_source, source);
     }
 }
 

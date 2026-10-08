@@ -24,7 +24,8 @@ network:
   user_agent: Universal-Tool-Updater/3
   timeout_seconds: 60
   progress: true
-  github_token_env: GITHUB_TOKEN
+  # Token 来源：env:变量名，或使用已登录的 GitHub CLI（gh auth token）。
+  github_token_source: env:GITHUB_TOKEN
 
   # 同时执行的完整工具更新任务数，可用 updater update --jobs N 覆盖。
   jobs: 4
